@@ -21,13 +21,13 @@ class ReservationService:
     def list_desks(self) -> list[DeskRecord]:
         return [desk for desk in self.repo.list_desks() if desk.enabled]
 
-    def ensure_user_for_email(self, email: str) -> UserRecord:
-        user = self.repo.get_user_by_email(email)
+    def ensure_user_for_name(self, name: str) -> UserRecord:
+        user = self.repo.get_user_by_name(name)
         if user:
             if not user.enabled:
                 raise HTTPException(status_code=403, detail="User disabled")
             return user
-        return self.repo.upsert_user(email=email, enabled=True, is_admin=False)
+        return self.repo.upsert_user(name=name, enabled=True, is_admin=False)
 
     def get_user_or_404(self, user_id: str) -> UserRecord:
         user = self.repo.get_user(user_id)
@@ -196,9 +196,9 @@ class ReservationService:
             )
         return [a for a in self.repo.list_absences() if a.owner_user_id == owner.user_id]
 
-    def admin_upsert_user(self, actor: UserRecord, email: str, enabled: bool, is_admin: bool) -> UserRecord:
+    def admin_upsert_user(self, actor: UserRecord, name: str, enabled: bool, is_admin: bool) -> UserRecord:
         self._require_admin(actor)
-        return self.repo.upsert_user(email=email, enabled=enabled, is_admin=is_admin)
+        return self.repo.upsert_user(name=name, enabled=enabled, is_admin=is_admin)
 
     def admin_upsert_desk(
         self,

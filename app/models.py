@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date as DateType, datetime
 from typing import Literal
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 
 
 SlotType = Literal["AM", "PM"]
@@ -12,7 +12,8 @@ RequestSlotType = Literal["AM", "PM", "FULL"]
 
 class UserRecord(BaseModel):
     user_id: str
-    email: EmailStr
+    name: str = Field(min_length=1, max_length=64)
+    email: str | None = None
     enabled: bool = True
     is_admin: bool = False
     created_at: datetime
@@ -45,13 +46,8 @@ class AbsenceRecord(BaseModel):
     created_at: datetime
 
 
-class OTPRequest(BaseModel):
-    email: EmailStr
-
-
-class OTPVerify(BaseModel):
-    email: EmailStr
-    code: str = Field(min_length=6, max_length=6)
+class NameLoginRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
 
 
 class AuthToken(BaseModel):
@@ -62,7 +58,7 @@ class AuthToken(BaseModel):
 class ReservationCreate(BaseModel):
     desk_id: str
     date: DateType
-    slot: RequestSlotType
+    slot: RequestSlotType = "FULL"
 
 
 class ReservationUpdate(BaseModel):
@@ -79,12 +75,12 @@ class ReservationsQuery(BaseModel):
 class AbsenceUpsert(BaseModel):
     desk_id: str
     date: DateType
-    slot: RequestSlotType
+    slot: RequestSlotType = "FULL"
     released: bool
 
 
 class AdminUserUpsert(BaseModel):
-    email: EmailStr
+    name: str = Field(min_length=1, max_length=64)
     enabled: bool = True
     is_admin: bool = False
 

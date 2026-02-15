@@ -18,7 +18,7 @@ SLOT_LABELS = {
 
 SHEETS = ["users", "desks", "reservations", "absences", "meta"]
 
-USERS_HEADERS = ["user_id", "email", "enabled", "is_admin", "created_at"]
+USERS_HEADERS = ["user_id", "name", "email", "enabled", "is_admin", "created_at"]
 DESKS_HEADERS = ["desk_id", "label", "enabled", "owner_user_id"]
 RESERVATIONS_HEADERS = [
     "reservation_id",

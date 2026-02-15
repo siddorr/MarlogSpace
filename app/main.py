@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, Query
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -15,14 +15,12 @@ from app.models import (
     AuthToken,
     DeskRecord,
     ForceCancelRequest,
-    OTPRequest,
-    OTPVerify,
+    NameLoginRequest,
     ReservationCreate,
     ReservationUpdate,
     StatsResponse,
     UserRecord,
 )
-from app.security import send_otp_email
 
 app = FastAPI(title="Desk Reservation API", version="0.1.0")
 STATIC_DIR = Path(__file__).parent / "static"
@@ -66,23 +64,9 @@ def list_users(user: UserRecord = Depends(require_user)) -> list[UserRecord]:
     return service.list_users()
 
 
-@app.post("/api/auth/request-otp")
-def request_otp(payload: OTPRequest) -> dict[str, str]:
-    try:
-        code = auth_store.issue_otp(payload.email)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    send_otp_email(str(payload.email), code)
-    return {"status": "ok"}
-
-
-@app.post("/api/auth/verify-otp", response_model=AuthToken)
-def verify_otp(payload: OTPVerify) -> AuthToken:
-    ok = auth_store.verify_otp(str(payload.email), payload.code)
-    if not ok:
-        raise HTTPException(status_code=401, detail="Invalid OTP")
-
-    user = service.ensure_user_for_email(str(payload.email))
+@app.post("/api/auth/login", response_model=AuthToken)
+def login(payload: NameLoginRequest) -> AuthToken:
+    user = service.ensure_user_for_name(payload.name)
     token = auth_store.create_session(user.user_id)
     return AuthToken(token=token, user=user)
 
@@ -155,7 +139,7 @@ def upsert_absence(payload: AbsenceUpsert, user: UserRecord = Depends(require_us
 def admin_upsert_user(payload: AdminUserUpsert, user: UserRecord = Depends(require_user)):
     return service.admin_upsert_user(
         actor=user,
-        email=str(payload.email),
+        name=payload.name,
         enabled=payload.enabled,
         is_admin=payload.is_admin,
     )

@@ -21,16 +21,11 @@
     <main class="layout">
       <section id="authCard" class="card">
         <h2>Sign In</h2>
-        <p>Use your <code>@ide-tech.com</code> email and OTP.</p>
-        <label>Email</label>
-        <input id="emailInput" type="email" placeholder="name@ide-tech.com" />
+        <p>Enter your name to continue.</p>
+        <label>Name</label>
+        <input id="nameInput" type="text" maxlength="64" placeholder="Your name" />
         <div class="row">
-          <button id="requestOtpBtn" class="btn">Request OTP</button>
-        </div>
-        <label>OTP Code</label>
-        <input id="otpInput" type="text" maxlength="6" placeholder="6 digits" />
-        <div class="row">
-          <button id="verifyOtpBtn" class="btn btn-primary">Verify & Login</button>
+          <button id="loginBtn" class="btn btn-primary">Login</button>
         </div>
         <p id="authMessage" class="message"></p>
       </section>
@@ -47,9 +42,9 @@
 
           <label>Slot</label>
           <select id="slotInput">
+            <option value="FULL" selected>FULL</option>
             <option value="AM">AM</option>
             <option value="PM">PM</option>
-            <option value="FULL">FULL</option>
           </select>
 
           <label>Desk</label>
@@ -61,17 +56,18 @@
         <p id="appMessage" class="message"></p>
 
         <div class="panel">
-          <h3>Desk Map (Selected Date)</h3>
-          <table id="deskTable">
-            <thead>
-              <tr>
-                <th>Desk</th>
-                <th>AM</th>
-                <th>PM</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
+          <h3>Calendar</h3>
+          <div id="calendarStrip" class="calendar-strip"></div>
+        </div>
+
+        <div class="panel">
+          <h3>Desk Layout (Selected Date)</h3>
+          <div class="legend">
+            <span><i class="dot dot-free"></i> Free</span>
+            <span><i class="dot dot-manual"></i> Reserved</span>
+            <span><i class="dot dot-auto"></i> Auto (named desk)</span>
+          </div>
+          <div id="deskMap" class="desk-map"></div>
         </div>
 
         <div class="panel">
@@ -88,9 +84,9 @@
             <input id="absenceDateInput" type="date" />
             <label>Slot</label>
             <select id="absenceSlotInput">
+              <option value="FULL" selected>FULL</option>
               <option value="AM">AM</option>
               <option value="PM">PM</option>
-              <option value="FULL">FULL</option>
             </select>
             <label>State</label>
             <select id="absenceStateInput">
@@ -107,8 +103,8 @@
           <div class="grid-two">
             <div>
               <h4>Upsert User</h4>
-              <label>Email</label>
-              <input id="adminUserEmail" type="email" placeholder="user@ide-tech.com" />
+              <label>Name</label>
+              <input id="adminUserName" type="text" placeholder="User name" />
               <label>Enabled</label>
               <select id="adminUserEnabled">
                 <option value="true">true</option>

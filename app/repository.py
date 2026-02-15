@@ -58,7 +58,8 @@ class ExcelRepository:
         return [
             UserRecord(
                 user_id=row["user_id"],
-                email=row["email"],
+                name=self._normalize_user_name(row),
+                email=row.get("email") or None,
                 enabled=normalize_bool(row["enabled"]),
                 is_admin=normalize_bool(row["is_admin"]),
                 created_at=self._parse_datetime(row["created_at"]),
@@ -67,10 +68,17 @@ class ExcelRepository:
             if row.get("user_id")
         ]
 
-    def get_user_by_email(self, email: str) -> UserRecord | None:
-        email = email.lower()
+    def get_user_by_name(self, name: str) -> UserRecord | None:
+        normalized_name = name.strip().lower()
         for user in self.list_users():
-            if user.email.lower() == email:
+            if user.name.strip().lower() == normalized_name:
+                return user
+        return None
+
+    def get_user_by_email(self, email: str) -> UserRecord | None:
+        normalized = email.lower()
+        for user in self.list_users():
+            if user.email and user.email.lower() == normalized:
                 return user
         return None
 
@@ -80,18 +88,31 @@ class ExcelRepository:
                 return user
         return None
 
-    def upsert_user(self, email: str, enabled: bool = True, is_admin: bool = False) -> UserRecord:
+    def upsert_user(
+        self,
+        name: str,
+        enabled: bool = True,
+        is_admin: bool = False,
+        email: str | None = None,
+    ) -> UserRecord:
         now = datetime.utcnow().isoformat()
+        normalized_name = name.strip()
+        normalized_email = email.lower().strip() if email else None
 
         def mutate(tables: Tables) -> dict[str, Any]:
             for row in tables.users:
-                if str(row.get("email", "")).lower() == email.lower():
+                row_name = self._normalize_user_name(row)
+                if row_name.strip().lower() == normalized_name.lower():
+                    row["name"] = normalized_name
+                    if normalized_email is not None:
+                        row["email"] = normalized_email
                     row["enabled"] = enabled
                     row["is_admin"] = is_admin
                     return row
             row = {
                 "user_id": uuid.uuid4().hex,
-                "email": email.lower(),
+                "name": normalized_name,
+                "email": normalized_email,
                 "enabled": enabled,
                 "is_admin": is_admin,
                 "created_at": now,
@@ -102,7 +123,8 @@ class ExcelRepository:
         row = self._write_tables(mutate)
         return UserRecord(
             user_id=row["user_id"],
-            email=row["email"],
+            name=self._normalize_user_name(row),
+            email=row.get("email") or None,
             enabled=normalize_bool(row["enabled"]),
             is_admin=normalize_bool(row["is_admin"]),
             created_at=self._parse_datetime(row["created_at"]),
@@ -465,3 +487,12 @@ class ExcelRepository:
         if isinstance(raw, datetime):
             return raw
         return datetime.fromisoformat(str(raw))
+
+    def _normalize_user_name(self, row: dict[str, Any]) -> str:
+        name = str(row.get("name") or "").strip()
+        if name:
+            return name
+        email = str(row.get("email") or "").strip()
+        if "@" in email:
+            return email.split("@", 1)[0]
+        return email or "user"
