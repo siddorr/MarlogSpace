@@ -158,6 +158,8 @@ function renderDeskMap() {
     majd: "C4",
     garik: "C5",
     oren: "C6",
+    parpari: "D3",
+    yosef: "D4",
   };
 
   const spots = {
@@ -188,7 +190,7 @@ function renderDeskMap() {
     }
   });
 
-  const unnamedSpots = ["B1", "B2", "B3", "B4", "D1", "D2", "D3", "D4"];
+  const unnamedSpots = ["B1", "B2", "B3", "B4", "D1", "D2"];
   const remaining = state.desks
     .filter((d) => !usedDeskIds.has(d.desk_id))
     .sort((a, b) => a.label.localeCompare(b.label));
