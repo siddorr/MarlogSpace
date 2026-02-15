@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Desk Reservation</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="bg-shape bg-shape-a" aria-hidden="true"></div>
+    <div class="bg-shape bg-shape-b" aria-hidden="true"></div>
+
+    <header class="topbar">
+      <div>
+        <h1>Desk Reservation</h1>
+        <p>Sun-Thu | AM 08:00-12:30 | PM 12:30-17:00</p>
+      </div>
+      <div id="sessionBadge" class="session-badge hidden"></div>
+    </header>
+
+    <main class="layout">
+      <section id="authCard" class="card">
+        <h2>Sign In</h2>
+        <p>Use your <code>@ide-tech.com</code> email and OTP.</p>
+        <label>Email</label>
+        <input id="emailInput" type="email" placeholder="name@ide-tech.com" />
+        <div class="row">
+          <button id="requestOtpBtn" class="btn">Request OTP</button>
+        </div>
+        <label>OTP Code</label>
+        <input id="otpInput" type="text" maxlength="6" placeholder="6 digits" />
+        <div class="row">
+          <button id="verifyOtpBtn" class="btn btn-primary">Verify & Login</button>
+        </div>
+        <p id="authMessage" class="message"></p>
+      </section>
+
+      <section id="appCard" class="card hidden">
+        <div class="row row-space">
+          <h2>Reservations</h2>
+          <button id="logoutBtn" class="btn">Logout</button>
+        </div>
+
+        <div class="toolbar">
+          <label>Date</label>
+          <input id="dateInput" type="date" />
+
+          <label>Slot</label>
+          <select id="slotInput">
+            <option value="AM">AM</option>
+            <option value="PM">PM</option>
+            <option value="FULL">FULL</option>
+          </select>
+
+          <label>Desk</label>
+          <select id="deskInput"></select>
+
+          <button id="bookBtn" class="btn btn-primary">Book</button>
+        </div>
+
+        <p id="appMessage" class="message"></p>
+
+        <div class="panel">
+          <h3>Desk Map (Selected Date)</h3>
+          <table id="deskTable">
+            <thead>
+              <tr>
+                <th>Desk</th>
+                <th>AM</th>
+                <th>PM</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="panel">
+          <h3>My Explicit Reservations</h3>
+          <ul id="myReservations" class="list"></ul>
+        </div>
+
+        <div class="panel">
+          <h3>Named Desk Release</h3>
+          <div class="toolbar">
+            <label>Desk</label>
+            <select id="absenceDeskInput"></select>
+            <label>Date</label>
+            <input id="absenceDateInput" type="date" />
+            <label>Slot</label>
+            <select id="absenceSlotInput">
+              <option value="AM">AM</option>
+              <option value="PM">PM</option>
+              <option value="FULL">FULL</option>
+            </select>
+            <label>State</label>
+            <select id="absenceStateInput">
+              <option value="true">Released</option>
+              <option value="false">Not Released</option>
+            </select>
+            <button id="saveAbsenceBtn" class="btn">Save</button>
+          </div>
+        </div>
+
+        <div id="adminPanel" class="panel hidden">
+          <h3>Admin</h3>
+          <div id="adminStats" class="stats"></div>
+          <div class="grid-two">
+            <div>
+              <h4>Upsert User</h4>
+              <label>Email</label>
+              <input id="adminUserEmail" type="email" placeholder="user@ide-tech.com" />
+              <label>Enabled</label>
+              <select id="adminUserEnabled">
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </select>
+              <label>Admin</label>
+              <select id="adminUserAdmin">
+                <option value="false">false</option>
+                <option value="true">true</option>
+              </select>
+              <button id="saveUserBtn" class="btn">Save User</button>
+            </div>
+            <div>
+              <h4>Upsert Desk</h4>
+              <label>Desk ID (blank=create)</label>
+              <input id="adminDeskId" type="text" />
+              <label>Label</label>
+              <input id="adminDeskLabel" type="text" placeholder="Desk A1" />
+              <label>Enabled</label>
+              <select id="adminDeskEnabled">
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </select>
+              <label>Owner User ID (optional)</label>
+              <input id="adminDeskOwner" type="text" />
+              <button id="saveDeskBtn" class="btn">Save Desk</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
