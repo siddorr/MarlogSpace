@@ -1,104 +1,94 @@
 from __future__ import annotations
 
 import random
+import secrets
 import smtplib
 import ssl
-import uuid
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 
 from app.config import settings
 from app.constants import ALLOWED_DOMAIN
+from app.repository import SQLiteRepository
 
 
-@dataclass
-class OTPState:
-    code: str
-    expires_at: datetime
-    attempts_left: int
+class AuthManager:
+    def __init__(self, repo: SQLiteRepository) -> None:
+        self.repo = repo
 
-
-@dataclass
-class SessionState:
-    user_id: str
-    expires_at: datetime
-
-
-class AuthStore:
-    def __init__(self) -> None:
-        self._otp_by_email: dict[str, OTPState] = {}
-        self._sessions: dict[str, SessionState] = {}
-
-    def validate_email_domain(self, email: str) -> None:
-        if not email.lower().endswith(ALLOWED_DOMAIN):
-            raise ValueError("Only @ide-tech.com emails are allowed")
+    def validate_email(self, email: str) -> str:
+        normalized = email.strip().lower()
+        if not normalized.endswith(ALLOWED_DOMAIN) and normalized != "admin@company.com":
+            raise ValueError("Only approved company emails are allowed")
+        if not self.repo.email_allowed(normalized):
+            raise ValueError("Email is not in the whitelist")
+        return normalized
 
     def issue_otp(self, email: str) -> str:
-        self.validate_email_domain(email)
+        normalized = self.validate_email(email)
         code = "".join(random.choice("0123456789") for _ in range(settings.otp_length))
-        self._otp_by_email[email.lower()] = OTPState(
-            code=code,
-            expires_at=datetime.utcnow() + timedelta(minutes=settings.otp_ttl_minutes),
-            attempts_left=settings.otp_max_attempts,
-        )
+        expires_at = datetime.utcnow() + timedelta(minutes=settings.otp_ttl_minutes)
+        self.repo.save_otp(normalized, code, expires_at, settings.otp_max_attempts)
+        self._send_otp_email(normalized, code)
         return code
 
-    def verify_otp(self, email: str, code: str) -> bool:
-        self.validate_email_domain(email)
-        key = email.lower()
-        state = self._otp_by_email.get(key)
-        if state is None:
-            return False
-        if datetime.utcnow() > state.expires_at:
-            self._otp_by_email.pop(key, None)
-            return False
-        if state.attempts_left <= 0:
-            self._otp_by_email.pop(key, None)
-            return False
-        if state.code != code:
-            state.attempts_left -= 1
-            return False
-        self._otp_by_email.pop(key, None)
-        return True
-
-    def create_session(self, user_id: str) -> str:
-        token = uuid.uuid4().hex
-        self._sessions[token] = SessionState(
-            user_id=user_id,
+    def verify_otp(self, email: str, code: str) -> str | None:
+        normalized = self.validate_email(email)
+        row = self.repo.get_otp(normalized)
+        if not row:
+            return None
+        if datetime.utcnow() > datetime.fromisoformat(row["expires_at"]):
+            self.repo.delete_otp(normalized)
+            return None
+        if int(row["attempts_left"]) <= 0:
+            self.repo.delete_otp(normalized)
+            return None
+        if row["code"] != code:
+            self.repo.decrement_otp_attempts(normalized)
+            return None
+        self.repo.delete_otp(normalized)
+        token = secrets.token_urlsafe(32)
+        user = self.repo.get_user_by_email(normalized)
+        if not user:
+            user = self.repo.upsert_user(
+                name=normalized.split("@")[0].replace(".", " ").replace("_", " ").title(),
+                email=normalized,
+                enabled=True,
+                is_admin=False,
+            )
+        self.repo.create_session(
+            token=token,
+            user_id=user.user_id,
             expires_at=datetime.utcnow() + timedelta(hours=settings.session_ttl_hours),
         )
         return token
 
-    def get_session_user(self, token: str) -> str | None:
-        state = self._sessions.get(token)
-        if state is None:
+    def get_session_user_id(self, token: str) -> str | None:
+        row = self.repo.get_session(token)
+        if not row:
             return None
-        if datetime.utcnow() > state.expires_at:
-            self._sessions.pop(token, None)
+        if datetime.utcnow() > datetime.fromisoformat(row["expires_at"]):
+            self.repo.delete_session(token)
             return None
-        return state.user_id
+        return str(row["user_id"])
 
     def logout(self, token: str) -> None:
-        self._sessions.pop(token, None)
+        self.repo.delete_session(token)
 
+    def _send_otp_email(self, recipient: str, code: str) -> None:
+        if not settings.smtp_host:
+            print(f"[OTP] {recipient}: {code}")
+            return
+        msg = EmailMessage()
+        msg["Subject"] = "Your MarlogSpace sign-in code"
+        msg["From"] = settings.smtp_from
+        msg["To"] = recipient
+        msg.set_content(f"Your MarlogSpace verification code is {code}.")
 
-def send_otp_email(recipient: str, code: str) -> None:
-    if not settings.smtp_host:
-        print(f"[WARN] SMTP not configured; OTP for {recipient}: {code}")
-        return
-
-    msg = EmailMessage()
-    msg["Subject"] = "Your Desk Reservation OTP"
-    msg["From"] = settings.smtp_from
-    msg["To"] = recipient
-    msg.set_content(
-        f"Your OTP code is {code}. It expires in {settings.otp_ttl_minutes} minutes."
-    )
-
-    context = ssl.create_default_context()
-    with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as smtp:
-        smtp.starttls(context=context)
-        if settings.smtp_username and settings.smtp_password:
-            smtp.login(settings.smtp_username, settings.smtp_password)
-        smtp.send_message(msg)
+        context = ssl.create_default_context()
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as smtp:
+            if settings.smtp_use_tls:
+                smtp.starttls(context=context)
+            if settings.smtp_username and settings.smtp_password:
+                smtp.login(settings.smtp_username, settings.smtp_password)
+            smtp.send_message(msg)

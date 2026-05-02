@@ -244,6 +244,13 @@ th {
   gap: 14px;
 }
 
+.tab-bar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
 .hidden {
   display: none;
 }
@@ -416,6 +423,43 @@ th {
 
 .dot-auto {
   background: #2563eb;
+}
+
+.dot-pending {
+  background: #b45309;
+}
+
+.dot-blocked {
+  background: #6b7280;
+}
+
+.slot-pending {
+  background: #fef3c7;
+}
+
+.slot-blocked {
+  background: #e5e7eb;
+}
+
+.desk-map-canvas {
+  position: relative;
+  margin-top: 12px;
+  min-height: 360px;
+  border-radius: 16px;
+  overflow: hidden;
+  background:
+    linear-gradient(to right, rgba(22, 34, 45, 0.08) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(22, 34, 45, 0.08) 1px, transparent 1px),
+    #faf7f1;
+  background-size: 48px 48px;
+}
+
+.map-seat {
+  position: absolute;
+  width: 150px;
+  border-radius: 12px;
+  text-align: left;
+  box-shadow: 0 8px 18px rgba(22, 34, 45, 0.12);
 }
 
 @keyframes rise {

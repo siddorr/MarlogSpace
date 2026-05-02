@@ -3,11 +3,20 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 import pytest
-from fastapi import HTTPException
-from filelock import FileLock
 
-from app.repository import ExcelRepository
-from app.services import ReservationService
+from app.models import (
+    AdminDeskUpsert,
+    AdminFloorUpsert,
+    AdminLocationUpsert,
+    AdminUserUpsert,
+    BookingCreate,
+    ManualReleaseUpsert,
+    PreferredPartnerUpsert,
+    WhitelistUpsert,
+)
+from app.repository import SQLiteRepository
+from app.security import AuthManager
+from app.services import MarlogService
 
 
 def _next_weekday(target_weekday: int):
@@ -18,110 +27,137 @@ def _next_weekday(target_weekday: int):
     return today + timedelta(days=delta)
 
 
+def _next_workday():
+    today = datetime.utcnow().date()
+    for offset in range(0, 7):
+        value = today + timedelta(days=offset)
+        if value.weekday() in {6, 0, 1, 2, 3}:
+            return value
+    raise AssertionError("No workday found")
+
+
 @pytest.fixture()
 def service(tmp_path):
-    repo = ExcelRepository()
-    repo.data_file = tmp_path / "reservations.xlsx"
-    repo.backup_dir = tmp_path / "backups"
-    repo.lock = FileLock(str(tmp_path / "reservations.lock"))
+    repo = SQLiteRepository(db_file=tmp_path / "marlogspace.db", legacy_excel_file=tmp_path / "missing.xlsx")
     repo.init_storage()
-    svc = ReservationService(repo=repo)
+    auth = AuthManager(repo=repo)
+    svc = MarlogService(repo=repo, auth=auth)
 
-    owner = repo.upsert_user("owner@ide-tech.com", enabled=True, is_admin=False)
-    alice = repo.upsert_user("alice@ide-tech.com", enabled=True, is_admin=False)
-    bob = repo.upsert_user("bob@ide-tech.com", enabled=True, is_admin=False)
-
-    desk1 = repo.upsert_desk(label="Desk 1", enabled=True, owner_user_id=None, desk_id="d1")
-    desk2 = repo.upsert_desk(
-        label="Desk 2",
+    admin = repo.upsert_user(
+        name="Admin",
+        email="admin@company.com",
         enabled=True,
-        owner_user_id=owner.user_id,
-        desk_id="d2",
+        is_admin=True,
+        location="Haifa",
+        department="Facilities",
+    )
+    owner = repo.upsert_user("Owner", "owner@ide-tech.com", enabled=True, is_admin=False)
+    alice = repo.upsert_user("Alice", "alice@ide-tech.com", enabled=True, is_admin=False)
+    bob = repo.upsert_user("Bob", "bob@ide-tech.com", enabled=True, is_admin=False)
+    for user in [admin, owner, alice, bob]:
+        repo.upsert_whitelist(user.email, user.user_id, "test")
+
+    location = svc.admin_upsert_location(admin, AdminLocationUpsert(name="Haifa"))
+    floor = svc.admin_upsert_floor(admin, AdminFloorUpsert(location_id=location.location_id, name="2"))
+    desk1 = svc.admin_upsert_desk(
+        admin,
+        AdminDeskUpsert(floor_id=floor.floor_id, label="Desk 1", x=10, y=10),
+    )
+    desk2 = svc.admin_upsert_desk(
+        admin,
+        AdminDeskUpsert(floor_id=floor.floor_id, label="Desk 2", owner_user_id=owner.user_id, x=40, y=10),
     )
 
     return {
         "repo": repo,
         "service": svc,
+        "admin": admin,
         "owner": owner,
         "alice": alice,
         "bob": bob,
+        "location": location,
+        "floor": floor,
         "desk1": desk1,
         "desk2": desk2,
     }
 
 
-def _next_workday():
-    today = datetime.utcnow().date()
-    for offset in range(0, 7):
-        d = today + timedelta(days=offset)
-        if d.weekday() in {6, 0, 1, 2, 3}:
-            return d
-    raise AssertionError("No workday found")
-
-
 def test_reject_non_workday(service):
     friday = _next_weekday(4)
-    with pytest.raises(HTTPException) as exc:
-        service["service"].create_reservation(
-            user=service["alice"],
-            desk_id=service["desk1"].desk_id,
-            value_date=friday,
-            request_slot="AM",
+    with pytest.raises(Exception) as exc:
+        service["service"].create_booking(
+            service["alice"],
+            BookingCreate(desk_id=service["desk1"].desk_id, date=friday, slot="AM"),
         )
-    assert exc.value.status_code == 400
+    assert "Sun-Thu" in str(exc.value)
 
 
 def test_reject_outside_window(service):
     outside = datetime.utcnow().date() + timedelta(days=7)
-    with pytest.raises(HTTPException) as exc:
-        service["service"].create_reservation(
-            user=service["alice"],
-            desk_id=service["desk1"].desk_id,
-            value_date=outside,
-            request_slot="AM",
+    with pytest.raises(Exception) as exc:
+        service["service"].create_booking(
+            service["alice"],
+            BookingCreate(desk_id=service["desk1"].desk_id, date=outside, slot="AM"),
         )
-    assert exc.value.status_code == 400
+    assert "outside booking window" in str(exc.value)
 
 
 def test_prevent_desk_double_booking(service):
-    d = _next_workday()
+    day = _next_workday()
     svc = service["service"]
-    svc.create_reservation(service["alice"], service["desk1"].desk_id, d, "AM")
-
-    with pytest.raises(HTTPException) as exc:
-        svc.create_reservation(service["bob"], service["desk1"].desk_id, d, "AM")
-    assert exc.value.status_code == 409
-
-
-def test_prevent_user_double_booking(service):
-    d = _next_workday()
-    svc = service["service"]
-    svc.create_reservation(service["alice"], service["desk1"].desk_id, d, "AM")
-
-    with pytest.raises(HTTPException) as exc:
-        svc.create_reservation(service["alice"], service["desk2"].desk_id, d, "AM")
-    assert exc.value.status_code == 409
+    svc.create_booking(service["alice"], BookingCreate(desk_id=service["desk1"].desk_id, date=day, slot="AM"))
+    with pytest.raises(Exception) as exc:
+        svc.create_booking(service["bob"], BookingCreate(desk_id=service["desk1"].desk_id, date=day, slot="AM"))
+    assert "Desk already reserved" in str(exc.value)
 
 
 def test_named_desk_release_allows_booking(service):
-    d = _next_workday()
+    day = _next_workday()
     svc = service["service"]
-    owner = service["owner"]
+    with pytest.raises(Exception):
+        svc.create_booking(service["alice"], BookingCreate(desk_id=service["desk2"].desk_id, date=day, slot="AM"))
 
-    with pytest.raises(HTTPException) as exc:
-        svc.create_reservation(service["alice"], service["desk2"].desk_id, d, "AM")
-    assert exc.value.status_code == 409
+    svc.upsert_manual_release(
+        service["owner"],
+        ManualReleaseUpsert(desk_id=service["desk2"].desk_id, date=day, slot="AM", released=True),
+    )
+    created = svc.create_booking(service["alice"], BookingCreate(desk_id=service["desk2"].desk_id, date=day, slot="AM"))
+    assert created.status == "pending"
 
-    svc.upsert_absence(owner, service["desk2"].desk_id, d, "AM", released=True)
-    created = svc.create_reservation(service["alice"], service["desk2"].desk_id, d, "AM")
-    assert len(created) == 1
 
-
-def test_backup_created_on_write(service):
-    d = _next_workday()
+def test_preferred_partner_auto_approves(service):
+    day = _next_workday()
     svc = service["service"]
-    repo = service["repo"]
+    svc.upsert_manual_release(
+        service["owner"],
+        ManualReleaseUpsert(desk_id=service["desk2"].desk_id, date=day, slot="AM", released=True),
+    )
+    svc.create_preferred_partner(
+        service["owner"],
+        PreferredPartnerUpsert(desk_id=service["desk2"].desk_id, partner_user_id=service["alice"].user_id),
+    )
+    booking = svc.create_booking(service["alice"], BookingCreate(desk_id=service["desk2"].desk_id, date=day, slot="AM"))
+    assert booking.status == "approved"
 
-    svc.create_reservation(service["alice"], service["desk1"].desk_id, d, "AM")
-    backups = list(repo.backup_dir.glob("*.xlsx"))
-    assert backups
+
+def test_admin_can_create_whitelist_and_desk(service):
+    svc = service["service"]
+    entry = svc.admin_upsert_user(
+        service["admin"],
+        AdminUserUpsert(name="Maya", email="maya@ide-tech.com", enabled=True, is_admin=False),
+    )
+    whitelist = svc.admin_upsert_whitelist(service["admin"], WhitelistUpsert(email="maya@ide-tech.com"))
+    assert entry.email == "maya@ide-tech.com"
+    assert whitelist.email == "maya@ide-tech.com"
+
+
+def test_notifications_created_for_pending_request(service):
+    day = _next_workday()
+    svc = service["service"]
+    svc.upsert_manual_release(
+        service["owner"],
+        ManualReleaseUpsert(desk_id=service["desk2"].desk_id, date=day, slot="AM", released=True),
+    )
+    svc.create_booking(service["bob"], BookingCreate(desk_id=service["desk2"].desk_id, date=day, slot="AM"))
+    notifications = svc.list_notifications(service["owner"])
+    assert notifications

@@ -1,44 +1,60 @@
 const state = {
-  token: localStorage.getItem("desk_app_token") || "",
+  token: localStorage.getItem("marlogspace_token") || "",
   me: null,
-  users: [],
+  locations: [],
+  floors: [],
   desks: [],
-  reservations: [],
+  bookings: [],
+  notifications: [],
+  recurring: [],
+  whitelist: [],
+  audit: [],
+  stats: null,
+  activeTab: "map",
 };
 
 const el = {
   authCard: document.getElementById("authCard"),
   appCard: document.getElementById("appCard"),
-  nameInput: document.getElementById("nameInput"),
-  loginBtn: document.getElementById("loginBtn"),
+  emailInput: document.getElementById("emailInput"),
+  otpInput: document.getElementById("otpInput"),
+  requestOtpBtn: document.getElementById("requestOtpBtn"),
+  verifyOtpBtn: document.getElementById("verifyOtpBtn"),
   authMessage: document.getElementById("authMessage"),
   sessionBadge: document.getElementById("sessionBadge"),
   logoutBtn: document.getElementById("logoutBtn"),
+  tabBar: document.getElementById("tabBar"),
+  appMessage: document.getElementById("appMessage"),
+  locationInput: document.getElementById("locationInput"),
+  floorInput: document.getElementById("floorInput"),
   dateInput: document.getElementById("dateInput"),
   slotInput: document.getElementById("slotInput"),
-  deskInput: document.getElementById("deskInput"),
-  bookBtn: document.getElementById("bookBtn"),
-  appMessage: document.getElementById("appMessage"),
-  calendarStrip: document.getElementById("calendarStrip"),
   deskMap: document.getElementById("deskMap"),
-  myReservations: document.getElementById("myReservations"),
-  absenceDeskInput: document.getElementById("absenceDeskInput"),
-  absenceDateInput: document.getElementById("absenceDateInput"),
-  absenceSlotInput: document.getElementById("absenceSlotInput"),
-  absenceStateInput: document.getElementById("absenceStateInput"),
-  saveAbsenceBtn: document.getElementById("saveAbsenceBtn"),
-  adminPanel: document.getElementById("adminPanel"),
+  bookingList: document.getElementById("bookingList"),
+  notificationList: document.getElementById("notificationList"),
+  releaseDeskInput: document.getElementById("releaseDeskInput"),
+  releaseDateInput: document.getElementById("releaseDateInput"),
+  releaseSlotInput: document.getElementById("releaseSlotInput"),
+  saveReleaseBtn: document.getElementById("saveReleaseBtn"),
+  recurringDeskInput: document.getElementById("recurringDeskInput"),
+  weekdayInput: document.getElementById("weekdayInput"),
+  recurringSlotInput: document.getElementById("recurringSlotInput"),
+  saveRecurringBtn: document.getElementById("saveRecurringBtn"),
+  recurringList: document.getElementById("recurringList"),
   adminStats: document.getElementById("adminStats"),
-  adminUserName: document.getElementById("adminUserName"),
-  adminUserEnabled: document.getElementById("adminUserEnabled"),
-  adminUserAdmin: document.getElementById("adminUserAdmin"),
-  saveUserBtn: document.getElementById("saveUserBtn"),
-  adminDeskId: document.getElementById("adminDeskId"),
-  adminDeskLabel: document.getElementById("adminDeskLabel"),
-  adminDeskEnabled: document.getElementById("adminDeskEnabled"),
-  adminDeskOwner: document.getElementById("adminDeskOwner"),
+  whitelistEmail: document.getElementById("whitelistEmail"),
+  saveWhitelistBtn: document.getElementById("saveWhitelistBtn"),
+  whitelistList: document.getElementById("whitelistList"),
+  deskIdInput: document.getElementById("deskIdInput"),
+  deskLabelInput: document.getElementById("deskLabelInput"),
+  deskOwnerInput: document.getElementById("deskOwnerInput"),
+  deskXInput: document.getElementById("deskXInput"),
+  deskYInput: document.getElementById("deskYInput"),
   saveDeskBtn: document.getElementById("saveDeskBtn"),
+  auditList: document.getElementById("auditList"),
 };
+
+const screens = ["map", "bookings", "release", "notifications", "admin"];
 
 function todayISO() {
   return new Date().toISOString().slice(0, 10);
@@ -47,477 +63,431 @@ function todayISO() {
 function message(target, text, ok = false) {
   target.textContent = text;
   target.classList.remove("ok", "error");
-  if (!text) return;
-  target.classList.add(ok ? "ok" : "error");
+  if (text) target.classList.add(ok ? "ok" : "error");
 }
 
 async function api(path, options = {}) {
-  const headers = options.headers || {};
+  const headers = { ...(options.headers || {}) };
   headers["Content-Type"] = "application/json";
-  if (state.token) {
-    headers.Authorization = `Bearer ${state.token}`;
-  }
-
-  const res = await fetch(path, { ...options, headers });
-  let data = null;
-  try {
-    data = await res.json();
-  } catch (_) {
-    data = null;
-  }
-  if (!res.ok) {
-    const detail = data && data.detail ? data.detail : `HTTP ${res.status}`;
-    throw new Error(detail);
-  }
+  if (state.token) headers.Authorization = `Bearer ${state.token}`;
+  const response = await fetch(path, { ...options, headers });
+  const data = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(data?.detail || `HTTP ${response.status}`);
   return data;
 }
 
-function userById(userId) {
-  return state.users.find((u) => u.user_id === userId);
+function persistToken() {
+  if (state.token) localStorage.setItem("marlogspace_token", state.token);
+  else localStorage.removeItem("marlogspace_token");
+}
+
+function tabsForRole() {
+  const base = [
+    { id: "map", label: "Office Map" },
+    { id: "bookings", label: "Bookings" },
+    { id: "release", label: "Releases" },
+    { id: "notifications", label: "Notifications" },
+  ];
+  if (state.me?.is_admin) base.push({ id: "admin", label: "Admin" });
+  return base;
+}
+
+function renderTabs() {
+  el.tabBar.innerHTML = "";
+  tabsForRole().forEach((tab) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `btn${state.activeTab === tab.id ? " btn-primary" : ""}`;
+    button.textContent = tab.label;
+    button.addEventListener("click", () => {
+      state.activeTab = tab.id;
+      renderTabs();
+      renderScreens();
+    });
+    el.tabBar.appendChild(button);
+  });
+}
+
+function renderScreens() {
+  screens.forEach((id) => {
+    const node = document.getElementById(`screen-${id}`);
+    if (!node) return;
+    node.classList.toggle("hidden", state.activeTab !== id);
+  });
 }
 
 function renderSession() {
   if (!state.me) {
     el.sessionBadge.classList.add("hidden");
+    el.logoutBtn.classList.add("hidden");
     return;
   }
   el.sessionBadge.classList.remove("hidden");
-  el.sessionBadge.textContent = `${state.me.name} | ${state.me.is_admin ? "admin" : "user"}`;
+  el.logoutBtn.classList.remove("hidden");
+  el.sessionBadge.textContent = `${state.me.name} | ${state.me.is_admin ? "admin" : "user"} | ${state.me.email}`;
 }
 
-function renderDesks() {
-  el.deskInput.innerHTML = "";
-  el.absenceDeskInput.innerHTML = "";
-
-  state.desks.forEach((desk) => {
-    const opt = document.createElement("option");
-    opt.value = desk.desk_id;
-    opt.textContent = `${desk.label} (${desk.desk_id.slice(0, 6)})`;
-    el.deskInput.appendChild(opt);
-
-    if (state.me && desk.owner_user_id === state.me.user_id) {
-      const ownOpt = document.createElement("option");
-      ownOpt.value = desk.desk_id;
-      ownOpt.textContent = `${desk.label}`;
-      el.absenceDeskInput.appendChild(ownOpt);
-    }
+function fillSelect(select, items, valueKey, labelKey) {
+  const current = select.value;
+  select.innerHTML = "";
+  items.forEach((item) => {
+    const option = document.createElement("option");
+    option.value = item[valueKey];
+    option.textContent = item[labelKey];
+    select.appendChild(option);
   });
-}
-
-function labelForDate(dateString) {
-  const d = new Date(`${dateString}T00:00:00`);
-  return {
-    day: d.toLocaleDateString(undefined, { weekday: "short" }),
-    date: d.toLocaleDateString(undefined, { month: "short", day: "numeric" }),
-  };
-}
-
-function isWorkday(dateString) {
-  const d = new Date(`${dateString}T00:00:00`);
-  const w = d.getDay();
-  return w >= 0 && w <= 4;
-}
-
-function renderCalendar() {
-  const start = new Date();
-  el.calendarStrip.innerHTML = "";
-  for (let i = 0; i < 7; i += 1) {
-    const d = new Date(start);
-    d.setDate(start.getDate() + i);
-    const iso = d.toISOString().slice(0, 10);
-    const l = labelForDate(iso);
-    const btn = document.createElement("button");
-    btn.className = `day-pill${el.dateInput.value === iso ? " active" : ""}${isWorkday(iso) ? "" : " off"}`;
-    btn.innerHTML = `<small>${l.day}</small><strong>${l.date}</strong>`;
-    btn.type = "button";
-    btn.addEventListener("click", () => {
-      el.dateInput.value = iso;
-      renderCalendar();
-      renderDeskMap();
-    });
-    el.calendarStrip.appendChild(btn);
+  if (current && items.some((item) => item[valueKey] === current)) {
+    select.value = current;
   }
+}
+
+function deskLabel(item) {
+  return `${item.label}${item.owner_user_id ? ` | owner ${item.owner_user_id.slice(0, 6)}` : ""}`;
+}
+
+function stateClass(item) {
+  return {
+    free: "slot-free",
+    pending: "slot-pending",
+    booked: "slot-manual",
+    owned: "slot-auto",
+    blocked: "slot-blocked",
+  }[item.state] || "slot-free";
 }
 
 function renderDeskMap() {
-  const selectedDate = el.dateInput.value;
-  const byOwner = {};
+  el.deskMap.innerHTML = "";
+  if (!state.desks.length) {
+    el.deskMap.textContent = "No desks on this floor";
+    return;
+  }
+  const maxX = Math.max(...state.desks.map((desk) => desk.x), 0) + 28;
+  const maxY = Math.max(...state.desks.map((desk) => desk.y), 0) + 22;
+  el.deskMap.style.minHeight = `${Math.max(maxY * 4, 320)}px`;
+  el.deskMap.style.setProperty("--map-width", `${maxX}`);
   state.desks.forEach((desk) => {
-    if (!desk.owner_user_id) return;
-    const owner = userById(desk.owner_user_id);
-    if (!owner) return;
-    byOwner[owner.name.trim().toLowerCase()] = desk;
-  });
-
-  const namedSpotMap = {
-    guy: "A1",
-    tal: "A2",
-    merav: "C1",
-    shoval: "C2",
-    frida: "C3",
-    majd: "C4",
-    garik: "C5",
-    oren: "C6",
-    parpari: "D3",
-    yosef: "D4",
-  };
-
-  const spots = {
-    A1: null,
-    A2: null,
-    B1: null,
-    B2: null,
-    B3: null,
-    B4: null,
-    C1: null,
-    C2: null,
-    C3: null,
-    C4: null,
-    C5: null,
-    C6: null,
-    D1: null,
-    D2: null,
-    D3: null,
-    D4: null,
-  };
-
-  const usedDeskIds = new Set();
-  Object.entries(namedSpotMap).forEach(([name, spot]) => {
-    const desk = byOwner[name];
-    if (desk) {
-      spots[spot] = desk;
-      usedDeskIds.add(desk.desk_id);
-    }
-  });
-
-  const unnamedSpots = ["B1", "B2", "B3", "B4", "D1", "D2"];
-  const remaining = state.desks
-    .filter((d) => !usedDeskIds.has(d.desk_id))
-    .sort((a, b) => a.label.localeCompare(b.label));
-
-  unnamedSpots.forEach((spot, idx) => {
-    if (remaining[idx]) {
-      spots[spot] = remaining[idx];
-    }
-  });
-  const overflowDesks = remaining.slice(unnamedSpots.length);
-
-  function reservationFor(deskId, slot) {
-    return state.reservations.find(
-      (r) => r.desk_id === deskId && r.date === selectedDate && r.slot === slot
-    );
-  }
-
-  function occupantLabel(reservation) {
-    if (!reservation) return "Free";
-    const u = userById(reservation.user_id);
-    return `${u ? u.name : reservation.user_id}${reservation.auto ? " (auto)" : ""}`;
-  }
-
-  function seatState(am, pm) {
-    const list = [am, pm].filter(Boolean);
-    if (!list.length) return "slot-free";
-    if (list.some((r) => !r.auto)) return "slot-manual";
-    return "slot-auto";
-  }
-
-  function seatHtml(spotKey, fallbackLabel = "Desk") {
-    const desk = spots[spotKey];
-    if (!desk) {
-      return `<div class="seat seat-empty"><div class="seat-title">${fallbackLabel}</div></div>`;
-    }
-    const owner = desk.owner_user_id ? userById(desk.owner_user_id) : null;
-    const am = reservationFor(desk.desk_id, "AM");
-    const pm = reservationFor(desk.desk_id, "PM");
-    const cls = seatState(am, pm);
-    const selectedClass = el.deskInput.value === desk.desk_id ? " seat-selected" : "";
-    return `
-      <div class="seat ${cls} seat-selectable${selectedClass}" data-desk-id="${desk.desk_id}">
-        <div class="seat-title">${owner ? owner.name : desk.label}</div>
-        <div class="seat-sub">${desk.label}</div>
-        <div class="seat-line">AM: ${occupantLabel(am)}</div>
-        <div class="seat-line">PM: ${occupantLabel(pm)}</div>
-      </div>
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = `seat map-seat ${stateClass(desk)}`;
+    card.style.left = `${desk.x}%`;
+    card.style.top = `${desk.y}%`;
+    card.innerHTML = `
+      <div class="seat-title">${desk.label}</div>
+      <div class="seat-sub">${desk.state}</div>
+      <div class="seat-line">${desk.owner_user_id ? `owner ${desk.owner_user_id.slice(0, 6)}` : "shared desk"}</div>
+      <div class="seat-line">${desk.pending_request_count ? `${desk.pending_request_count} pending` : "ready"}</div>
     `;
-  }
-
-  function seatHtmlForDesk(desk) {
-    const owner = desk.owner_user_id ? userById(desk.owner_user_id) : null;
-    const am = reservationFor(desk.desk_id, "AM");
-    const pm = reservationFor(desk.desk_id, "PM");
-    const cls = seatState(am, pm);
-    const selectedClass = el.deskInput.value === desk.desk_id ? " seat-selected" : "";
-    return `
-      <div class="seat ${cls} seat-selectable${selectedClass}" data-desk-id="${desk.desk_id}">
-        <div class="seat-title">${owner ? owner.name : desk.label}</div>
-        <div class="seat-sub">${desk.label}</div>
-        <div class="seat-line">AM: ${occupantLabel(am)}</div>
-        <div class="seat-line">PM: ${occupantLabel(pm)}</div>
-      </div>
-    `;
-  }
-
-  el.deskMap.innerHTML = `
-    <div class="floorplan-grid">
-      <div class="zone zone-a">
-        ${seatHtml("A1", "Desk")}
-        ${seatHtml("A2", "Desk")}
-      </div>
-      <div class="zone zone-b">
-        ${seatHtml("B1")}
-        ${seatHtml("B2")}
-        ${seatHtml("B3")}
-        ${seatHtml("B4")}
-      </div>
-      <div class="zone zone-c">
-        ${seatHtml("C1")}
-        ${seatHtml("C2")}
-        ${seatHtml("C3")}
-        ${seatHtml("C4")}
-        ${seatHtml("C5")}
-        ${seatHtml("C6")}
-      </div>
-      <div class="zone zone-d">
-        ${seatHtml("D1")}
-        ${seatHtml("D2")}
-        ${seatHtml("D3")}
-        ${seatHtml("D4")}
-      </div>
-    </div>
-    ${
-      overflowDesks.length
-        ? `<div class="zone zone-overflow">${overflowDesks.map((desk) => seatHtmlForDesk(desk)).join("")}</div>`
-        : ""
-    }
-  `;
-
-  el.deskMap.querySelectorAll(".seat-selectable[data-desk-id]").forEach((node) => {
-    node.addEventListener("click", () => {
-      const deskId = node.getAttribute("data-desk-id");
-      if (!deskId) return;
-      el.deskInput.value = deskId;
-      renderDeskMap();
-      message(el.appMessage, "Desk selected", true);
-    });
+    card.addEventListener("click", () => createBooking(desk.desk_id));
+    el.deskMap.appendChild(card);
   });
 }
 
-function renderMyReservations() {
-  if (!state.me) {
-    el.myReservations.innerHTML = "";
+function renderBookings() {
+  el.bookingList.innerHTML = "";
+  if (!state.bookings.length) {
+    el.bookingList.innerHTML = "<li>No bookings yet</li>";
     return;
   }
-
-  const mine = state.reservations
-    .filter((r) => r.user_id === state.me.user_id && !r.auto)
-    .sort((a, b) => `${a.date}${a.slot}`.localeCompare(`${b.date}${b.slot}`));
-
-  el.myReservations.innerHTML = "";
-  if (!mine.length) {
-    el.myReservations.innerHTML = "<li>No explicit reservations</li>";
-    return;
-  }
-
-  mine.forEach((r) => {
-    const desk = state.desks.find((d) => d.desk_id === r.desk_id);
-    const li = document.createElement("li");
-    li.innerHTML = `
-      <span>${r.date} ${r.slot} | ${desk ? desk.label : r.desk_id}</span>
-      <button class="btn" data-cancel="${r.reservation_id}">Cancel</button>
-    `;
-    el.myReservations.appendChild(li);
-  });
-
-  el.myReservations.querySelectorAll("button[data-cancel]").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      try {
-        await api(`/api/reservations/${btn.dataset.cancel}`, { method: "DELETE" });
-        await refreshData();
-        message(el.appMessage, "Reservation cancelled", true);
-      } catch (err) {
-        message(el.appMessage, err.message, false);
-      }
+  state.bookings.forEach((booking) => {
+    const row = document.createElement("li");
+    row.innerHTML = `<span>${booking.date} | ${booking.slot} | ${booking.status}</span>`;
+    const actions = document.createElement("div");
+    const cancelBtn = document.createElement("button");
+    cancelBtn.className = "btn";
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.addEventListener("click", async () => {
+      await api(`/api/bookings/${booking.booking_id}/cancel`, { method: "POST" });
+      await refreshApp();
     });
+    actions.appendChild(cancelBtn);
+    if (state.me?.is_admin && booking.status === "pending") {
+      const approveBtn = document.createElement("button");
+      approveBtn.className = "btn btn-primary";
+      approveBtn.textContent = "Approve";
+      approveBtn.addEventListener("click", async () => {
+        await api(`/api/bookings/${booking.booking_id}/approve`, { method: "POST" });
+        await refreshApp();
+      });
+      actions.appendChild(approveBtn);
+    }
+    row.appendChild(actions);
+    el.bookingList.appendChild(row);
   });
 }
 
-async function refreshData() {
-  const start = todayISO();
-  const end = new Date(Date.now() + 6 * 86400000).toISOString().slice(0, 10);
-  const [me, users, desks, reservations] = await Promise.all([
-    api("/api/me"),
-    api("/api/users"),
-    api("/api/desks"),
-    api(`/api/reservations?start_date=${start}&end_date=${end}`),
-  ]);
-  state.me = me;
-  state.users = users;
-  state.desks = desks;
-  state.reservations = reservations;
-
-  renderSession();
-  renderDesks();
-  renderCalendar();
-  renderDeskMap();
-  renderMyReservations();
-  renderAdmin();
-}
-
-async function loginFlow() {
-  const name = el.nameInput.value.trim();
-  if (!name) {
-    message(el.authMessage, "Name is required", false);
+function renderNotifications() {
+  el.notificationList.innerHTML = "";
+  if (!state.notifications.length) {
+    el.notificationList.innerHTML = "<li>No notifications</li>";
     return;
   }
-  try {
-    const data = await api("/api/auth/login", {
-      method: "POST",
-      body: JSON.stringify({ name }),
+  state.notifications.forEach((item) => {
+    const row = document.createElement("li");
+    row.innerHTML = `<span>${item.message}</span>`;
+    const button = document.createElement("button");
+    button.className = "btn";
+    button.textContent = item.read_at ? "Read" : "Mark Read";
+    button.disabled = Boolean(item.read_at);
+    button.addEventListener("click", async () => {
+      await api(`/api/notifications/${item.notification_id}/read`, { method: "POST" });
+      await refreshApp();
     });
-    state.token = data.token;
-    localStorage.setItem("desk_app_token", state.token);
-    message(el.authMessage, "Logged in", true);
-    await enterApp();
-  } catch (err) {
-    message(el.authMessage, err.message, false);
-  }
+    row.appendChild(button);
+    el.notificationList.appendChild(row);
+  });
 }
 
-async function enterApp() {
-  try {
-    await refreshData();
-    el.authCard.classList.add("hidden");
-    el.appCard.classList.remove("hidden");
-  } catch (err) {
-    state.token = "";
-    localStorage.removeItem("desk_app_token");
-    state.me = null;
-    el.authCard.classList.remove("hidden");
-    el.appCard.classList.add("hidden");
-    message(el.authMessage, `Login required: ${err.message}`, false);
-  }
+function renderRecurring() {
+  el.recurringList.innerHTML = "";
+  state.recurring.forEach((item) => {
+    const row = document.createElement("li");
+    row.textContent = `${item.desk_id.slice(0, 6)} | weekday ${item.weekday} | ${item.slot}`;
+    el.recurringList.appendChild(row);
+  });
 }
 
 function renderAdmin() {
-  if (!state.me || !state.me.is_admin) {
-    el.adminPanel.classList.add("hidden");
-    return;
-  }
-  el.adminPanel.classList.remove("hidden");
-  api("/api/admin/stats")
-    .then((stats) => {
-      el.adminStats.innerHTML = `
-        <span>Total reservations: ${stats.total_reservations}</span>
-        <span>Active users: ${stats.active_users}</span>
-        <span>Enabled desks: ${stats.enabled_desks}</span>
-      `;
-    })
-    .catch((err) => {
-      el.adminStats.textContent = err.message;
+  el.adminStats.innerHTML = "";
+  if (state.stats) {
+    Object.entries(state.stats).forEach(([key, value]) => {
+      const chip = document.createElement("span");
+      chip.textContent = `${key}: ${value}`;
+      el.adminStats.appendChild(chip);
     });
+  }
+
+  el.whitelistList.innerHTML = "";
+  state.whitelist.forEach((item) => {
+    const row = document.createElement("li");
+    row.innerHTML = `<span>${item.email}</span>`;
+    const button = document.createElement("button");
+    button.className = "btn";
+    button.textContent = "Delete";
+    button.addEventListener("click", async () => {
+      await api(`/api/admin/whitelist/${item.whitelist_id}`, { method: "DELETE" });
+      await refreshApp();
+    });
+    row.appendChild(button);
+    el.whitelistList.appendChild(row);
+  });
+
+  el.auditList.innerHTML = "";
+  state.audit.slice(0, 30).forEach((item) => {
+    const row = document.createElement("li");
+    row.textContent = `${item.timestamp} | ${item.action} | ${item.details}`;
+    el.auditList.appendChild(row);
+  });
 }
 
-async function bind() {
-  el.dateInput.value = todayISO();
-  el.absenceDateInput.value = todayISO();
-  el.slotInput.value = "FULL";
-  el.absenceSlotInput.value = "FULL";
+function renderOwnedDeskInputs() {
+  const owned = state.desks.filter((desk) => desk.owner_user_id === state.me?.user_id);
+  const fallback = state.me?.is_admin ? state.desks : owned;
+  fillSelect(el.releaseDeskInput, fallback, "desk_id", "label");
+  fillSelect(el.recurringDeskInput, fallback, "desk_id", "label");
+}
 
-  el.loginBtn.addEventListener("click", loginFlow);
-
-  el.bookBtn.addEventListener("click", async () => {
-    try {
-      await api("/api/reservations", {
-        method: "POST",
-        body: JSON.stringify({
-          desk_id: el.deskInput.value,
-          date: el.dateInput.value,
-          slot: el.slotInput.value,
-        }),
-      });
-      await refreshData();
-      message(el.appMessage, "Reservation saved", true);
-    } catch (err) {
-      message(el.appMessage, err.message, false);
-    }
-  });
-
-  el.dateInput.addEventListener("change", () => {
-    renderCalendar();
-    renderDeskMap();
-  });
-
-  el.saveAbsenceBtn.addEventListener("click", async () => {
-    try {
-      await api("/api/named-desk/absences", {
-        method: "PUT",
-        body: JSON.stringify({
-          desk_id: el.absenceDeskInput.value,
-          date: el.absenceDateInput.value,
-          slot: el.absenceSlotInput.value,
-          released: el.absenceStateInput.value === "true",
-        }),
-      });
-      await refreshData();
-      message(el.appMessage, "Absence state updated", true);
-    } catch (err) {
-      message(el.appMessage, err.message, false);
-    }
-  });
-
-  el.saveUserBtn.addEventListener("click", async () => {
-    try {
-      await api("/api/admin/users", {
-        method: "POST",
-        body: JSON.stringify({
-          name: el.adminUserName.value.trim(),
-          enabled: el.adminUserEnabled.value === "true",
-          is_admin: el.adminUserAdmin.value === "true",
-        }),
-      });
-      await refreshData();
-      message(el.appMessage, "User updated", true);
-    } catch (err) {
-      message(el.appMessage, err.message, false);
-    }
-  });
-
-  el.saveDeskBtn.addEventListener("click", async () => {
-    try {
-      await api("/api/admin/desks", {
-        method: "POST",
-        body: JSON.stringify({
-          desk_id: el.adminDeskId.value.trim() || null,
-          label: el.adminDeskLabel.value.trim(),
-          enabled: el.adminDeskEnabled.value === "true",
-          owner_user_id: el.adminDeskOwner.value.trim() || null,
-        }),
-      });
-      await refreshData();
-      message(el.appMessage, "Desk updated", true);
-    } catch (err) {
-      message(el.appMessage, err.message, false);
-    }
-  });
-
-  el.logoutBtn.addEventListener("click", async () => {
-    try {
-      await api("/api/auth/logout", { method: "POST" });
-    } catch (_) {
-      // ignore
-    }
-    state.token = "";
-    state.me = null;
-    localStorage.removeItem("desk_app_token");
-    el.authCard.classList.remove("hidden");
-    el.appCard.classList.add("hidden");
-    renderSession();
-    message(el.authMessage, "Logged out", true);
-  });
-
-  if (state.token) {
-    await enterApp();
+async function createBooking(deskId) {
+  try {
+    const booking = await api("/api/bookings", {
+      method: "POST",
+      body: JSON.stringify({
+        desk_id: deskId,
+        date: el.dateInput.value,
+        slot: el.slotInput.value,
+      }),
+    });
+    message(el.appMessage, `Booking ${booking.status}`, true);
+    await refreshApp();
+  } catch (error) {
+    message(el.appMessage, error.message);
   }
 }
 
-bind();
+async function refreshFloors() {
+  if (!el.locationInput.value) return;
+  state.floors = await api(`/api/floors?location_id=${encodeURIComponent(el.locationInput.value)}`);
+  fillSelect(el.floorInput, state.floors, "floor_id", "name");
+}
+
+async function refreshDesks() {
+  if (!el.floorInput.value || !el.dateInput.value) return;
+  const params = new URLSearchParams({
+    location_id: el.locationInput.value,
+    floor_id: el.floorInput.value,
+    date: el.dateInput.value,
+  });
+  state.desks = await api(`/api/desks?${params.toString()}`);
+}
+
+async function refreshApp() {
+  if (!state.token) return;
+  state.me = await api("/api/auth/session");
+  state.locations = await api("/api/locations");
+  fillSelect(el.locationInput, state.locations, "location_id", "name");
+  await refreshFloors();
+  await refreshDesks();
+  state.bookings = await api("/api/bookings");
+  state.notifications = await api("/api/notifications");
+  state.recurring = await api("/api/desk-releases/recurring");
+  if (state.me.is_admin) {
+    state.stats = await api("/api/admin/stats");
+    state.whitelist = await api("/api/admin/whitelist");
+    state.audit = await api("/api/admin/audit-log");
+  } else {
+    state.stats = null;
+    state.whitelist = [];
+    state.audit = [];
+  }
+  renderSession();
+  renderTabs();
+  renderScreens();
+  renderDeskMap();
+  renderBookings();
+  renderNotifications();
+  renderRecurring();
+  renderOwnedDeskInputs();
+  renderAdmin();
+  el.authCard.classList.add("hidden");
+  el.appCard.classList.remove("hidden");
+}
+
+async function initializeSession() {
+  el.dateInput.value = todayISO();
+  el.releaseDateInput.value = todayISO();
+  if (!state.token) return;
+  try {
+    await refreshApp();
+  } catch (_) {
+    state.token = "";
+    persistToken();
+  }
+}
+
+el.requestOtpBtn.addEventListener("click", async () => {
+  try {
+    await api("/api/auth/request-otp", {
+      method: "POST",
+      body: JSON.stringify({ email: el.emailInput.value }),
+    });
+    message(el.authMessage, "OTP sent. Check configured email or server log.", true);
+  } catch (error) {
+    message(el.authMessage, error.message);
+  }
+});
+
+el.verifyOtpBtn.addEventListener("click", async () => {
+  try {
+    const result = await api("/api/auth/verify-otp", {
+      method: "POST",
+      body: JSON.stringify({ email: el.emailInput.value, code: el.otpInput.value }),
+    });
+    state.token = result.token;
+    persistToken();
+    await refreshApp();
+    message(el.authMessage, "", true);
+  } catch (error) {
+    message(el.authMessage, error.message);
+  }
+});
+
+el.logoutBtn.addEventListener("click", async () => {
+  try {
+    await api("/api/auth/logout", { method: "POST" });
+  } catch (_) {
+    // Ignore server logout failures during local cleanup.
+  }
+  state.token = "";
+  state.me = null;
+  persistToken();
+  el.authCard.classList.remove("hidden");
+  el.appCard.classList.add("hidden");
+  renderSession();
+});
+
+el.locationInput.addEventListener("change", async () => {
+  await refreshFloors();
+  await refreshDesks();
+  renderDeskMap();
+});
+
+el.floorInput.addEventListener("change", async () => {
+  await refreshDesks();
+  renderDeskMap();
+});
+
+el.dateInput.addEventListener("change", async () => {
+  await refreshDesks();
+  renderDeskMap();
+});
+
+el.saveReleaseBtn.addEventListener("click", async () => {
+  try {
+    await api("/api/desk-releases/manual", {
+      method: "POST",
+      body: JSON.stringify({
+        desk_id: el.releaseDeskInput.value,
+        date: el.releaseDateInput.value,
+        slot: el.releaseSlotInput.value,
+        released: true,
+      }),
+    });
+    await refreshApp();
+  } catch (error) {
+    message(el.appMessage, error.message);
+  }
+});
+
+el.saveRecurringBtn.addEventListener("click", async () => {
+  try {
+    await api("/api/desk-releases/recurring", {
+      method: "POST",
+      body: JSON.stringify({
+        desk_id: el.recurringDeskInput.value,
+        weekday: Number(el.weekdayInput.value),
+        slot: el.recurringSlotInput.value,
+        is_active: true,
+      }),
+    });
+    await refreshApp();
+  } catch (error) {
+    message(el.appMessage, error.message);
+  }
+});
+
+el.saveWhitelistBtn.addEventListener("click", async () => {
+  try {
+    await api("/api/admin/whitelist", {
+      method: "POST",
+      body: JSON.stringify({ email: el.whitelistEmail.value }),
+    });
+    el.whitelistEmail.value = "";
+    await refreshApp();
+  } catch (error) {
+    message(el.appMessage, error.message);
+  }
+});
+
+el.saveDeskBtn.addEventListener("click", async () => {
+  try {
+    await api("/api/admin/desks", {
+      method: "POST",
+      body: JSON.stringify({
+        desk_id: el.deskIdInput.value || null,
+        floor_id: el.floorInput.value,
+        label: el.deskLabelInput.value,
+        owner_user_id: el.deskOwnerInput.value || null,
+        enabled: true,
+        is_blocked: false,
+        x: Number(el.deskXInput.value),
+        y: Number(el.deskYInput.value),
+        zone: null,
+        equipment: {},
+      }),
+    });
+    await refreshApp();
+  } catch (error) {
+    message(el.appMessage, error.message);
+  }
+});
+
+initializeSession();

@@ -2,8 +2,31 @@ from __future__ import annotations
 
 from datetime import time
 
+
 WORKDAYS = {6, 0, 1, 2, 3}  # Sun..Thu with Python weekday mapping (Mon=0)
 ALLOWED_DOMAIN = "@ide-tech.com"
+
+ROLE_USER = "user"
+ROLE_ADMIN = "admin"
+
+STATE_FREE = "free"
+STATE_PENDING = "pending"
+STATE_BOOKED = "booked"
+STATE_OWNED = "owned"
+STATE_BLOCKED = "blocked"
+
+BOOKING_PENDING = "pending"
+BOOKING_APPROVED = "approved"
+BOOKING_REJECTED = "rejected"
+BOOKING_CANCELLED = "cancelled"
+BOOKING_EXPIRED = "expired"
+BOOKING_STATUSES = {
+    BOOKING_PENDING,
+    BOOKING_APPROVED,
+    BOOKING_REJECTED,
+    BOOKING_CANCELLED,
+    BOOKING_EXPIRED,
+}
 
 SLOT_AM = "AM"
 SLOT_PM = "PM"
@@ -15,26 +38,3 @@ SLOT_LABELS = {
     SLOT_AM: (time(hour=8), time(hour=12, minute=30)),
     SLOT_PM: (time(hour=12, minute=30), time(hour=17)),
 }
-
-SHEETS = ["users", "desks", "reservations", "absences", "meta"]
-
-USERS_HEADERS = ["user_id", "name", "email", "enabled", "is_admin", "created_at"]
-DESKS_HEADERS = ["desk_id", "label", "enabled", "owner_user_id"]
-RESERVATIONS_HEADERS = [
-    "reservation_id",
-    "user_id",
-    "desk_id",
-    "date",
-    "slot",
-    "created_at",
-    "updated_at",
-]
-ABSENCES_HEADERS = [
-    "absence_id",
-    "owner_user_id",
-    "desk_id",
-    "date",
-    "slot",
-    "created_at",
-]
-META_HEADERS = ["key", "value"]

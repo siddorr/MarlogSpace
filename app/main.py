@@ -7,22 +7,34 @@ from fastapi import Depends, FastAPI, Header, Query
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.deps import auth_store, repo, require_user, service
+from app.deps import auth, repo, require_user, service
 from app.models import (
-    AbsenceUpsert,
     AdminDeskUpsert,
+    AdminFloorUpsert,
+    AdminLocationUpsert,
     AdminUserUpsert,
+    AuthRequest,
     AuthToken,
+    BookingCreate,
+    BookingRecord,
+    DeskAvailability,
     DeskRecord,
-    ForceCancelRequest,
-    NameLoginRequest,
-    ReservationCreate,
-    ReservationUpdate,
+    FloorRecord,
+    LocationRecord,
+    ManualReleaseUpsert,
+    OTPVerifyRequest,
+    PreferredPartnerRecord,
+    PreferredPartnerUpsert,
+    RecurringReleaseRecord,
+    RecurringReleaseUpsert,
     StatsResponse,
     UserRecord,
+    WhitelistEntry,
+    WhitelistUpsert,
 )
 
-app = FastAPI(title="Desk Reservation API", version="0.1.0")
+
+app = FastAPI(title="MarlogSpace API", version="0.2.0")
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -30,6 +42,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 @app.on_event("startup")
 def on_startup() -> None:
     repo.init_storage()
+    repo.ensure_seed_admin()
 
 
 @app.get("/")
@@ -47,28 +60,19 @@ def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/api/me", response_model=UserRecord)
-def me(user: UserRecord = Depends(require_user)) -> UserRecord:
+@app.post("/api/auth/request-otp")
+def request_otp(payload: AuthRequest) -> dict[str, str]:
+    return service.request_otp(str(payload.email))
+
+
+@app.post("/api/auth/verify-otp", response_model=AuthToken)
+def verify_otp(payload: OTPVerifyRequest) -> AuthToken:
+    return service.verify_otp(str(payload.email), payload.code)
+
+
+@app.get("/api/auth/session", response_model=UserRecord)
+def auth_session(user: UserRecord = Depends(require_user)) -> UserRecord:
     return user
-
-
-@app.get("/api/desks", response_model=list[DeskRecord])
-def list_desks(user: UserRecord = Depends(require_user)) -> list[DeskRecord]:
-    _ = user
-    return service.list_desks()
-
-
-@app.get("/api/users", response_model=list[UserRecord])
-def list_users(user: UserRecord = Depends(require_user)) -> list[UserRecord]:
-    _ = user
-    return service.list_users()
-
-
-@app.post("/api/auth/login", response_model=AuthToken)
-def login(payload: NameLoginRequest) -> AuthToken:
-    user = service.ensure_user_for_name(payload.name)
-    token = auth_store.create_session(user.user_id)
-    return AuthToken(token=token, user=user)
 
 
 @app.post("/api/auth/logout")
@@ -77,91 +81,157 @@ def logout(
     authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> dict[str, str]:
     _ = user
-    parts = (authorization or "").split(" ", 1)
-    if len(parts) == 2 and parts[0].lower() == "bearer":
-        auth_store.logout(parts[1].strip())
+    token = (authorization or "").split(" ", 1)[1].strip()
+    service.logout(token)
     return {"status": "ok"}
 
 
-@app.post("/api/reservations")
-def create_reservation(payload: ReservationCreate, user: UserRecord = Depends(require_user)):
-    return service.create_reservation(
-        user=user,
-        desk_id=payload.desk_id,
-        value_date=payload.date,
-        request_slot=payload.slot,
-    )
+@app.get("/api/me", response_model=UserRecord)
+def me(user: UserRecord = Depends(require_user)) -> UserRecord:
+    return user
 
 
-@app.patch("/api/reservations/{reservation_id}")
-def patch_reservation(
-    reservation_id: str,
-    payload: ReservationUpdate,
-    user: UserRecord = Depends(require_user),
-):
-    return service.update_reservation(
-        user=user,
-        reservation_id=reservation_id,
-        desk_id=payload.desk_id,
-        value_date=payload.date,
-        request_slot=payload.slot,
-    )
-
-
-@app.delete("/api/reservations/{reservation_id}")
-def delete_reservation(reservation_id: str, user: UserRecord = Depends(require_user)) -> dict[str, str]:
-    service.cancel_reservation(actor=user, reservation_id=reservation_id)
-    return {"status": "ok"}
-
-
-@app.get("/api/reservations")
-def list_reservations(
-    start_date: date | None = Query(default=None),
-    end_date: date | None = Query(default=None),
-    user: UserRecord = Depends(require_user),
-):
+@app.get("/api/locations", response_model=list[LocationRecord])
+def list_locations(user: UserRecord = Depends(require_user)) -> list[LocationRecord]:
     _ = user
-    return service.list_effective_reservations(start_date=start_date, end_date=end_date)
+    return service.list_locations()
 
 
-@app.put("/api/named-desk/absences")
-def upsert_absence(payload: AbsenceUpsert, user: UserRecord = Depends(require_user)):
-    return service.upsert_absence(
-        owner=user,
-        desk_id=payload.desk_id,
-        value_date=payload.date,
-        request_slot=payload.slot,
-        released=payload.released,
-    )
+@app.get("/api/floors", response_model=list[FloorRecord])
+def list_floors(
+    location_id: str | None = Query(default=None),
+    user: UserRecord = Depends(require_user),
+) -> list[FloorRecord]:
+    _ = user
+    return service.list_floors(location_id)
 
 
-@app.post("/api/admin/users")
-def admin_upsert_user(payload: AdminUserUpsert, user: UserRecord = Depends(require_user)):
-    return service.admin_upsert_user(
-        actor=user,
-        name=payload.name,
-        enabled=payload.enabled,
-        is_admin=payload.is_admin,
-    )
+@app.get("/api/desks", response_model=list[DeskAvailability])
+def list_desks(
+    date_value: date = Query(alias="date"),
+    location_id: str | None = Query(default=None),
+    floor_id: str | None = Query(default=None),
+    user: UserRecord = Depends(require_user),
+) -> list[DeskAvailability]:
+    return service.list_desks(user, date_value, location_id, floor_id)
 
 
-@app.post("/api/admin/desks")
-def admin_upsert_desk(payload: AdminDeskUpsert, user: UserRecord = Depends(require_user)):
-    return service.admin_upsert_desk(
-        actor=user,
-        label=payload.label,
-        enabled=payload.enabled,
-        owner_user_id=payload.owner_user_id,
-        desk_id=payload.desk_id,
-    )
+@app.get("/api/bookings", response_model=list[BookingRecord])
+def list_bookings(user: UserRecord = Depends(require_user)) -> list[BookingRecord]:
+    return service.list_bookings(user)
 
 
-@app.post("/api/admin/force-cancel")
-def admin_force_cancel(payload: ForceCancelRequest, user: UserRecord = Depends(require_user)) -> dict[str, str]:
-    service.admin_force_cancel(actor=user, reservation_id=payload.reservation_id)
-    return {"status": "ok"}
+@app.post("/api/bookings", response_model=BookingRecord)
+def create_booking(payload: BookingCreate, user: UserRecord = Depends(require_user)) -> BookingRecord:
+    return service.create_booking(user, payload)
+
+
+@app.post("/api/bookings/{booking_id}/approve", response_model=BookingRecord)
+def approve_booking(booking_id: str, user: UserRecord = Depends(require_user)) -> BookingRecord:
+    return service.approve_booking(user, booking_id)
+
+
+@app.post("/api/bookings/{booking_id}/reject", response_model=BookingRecord)
+def reject_booking(booking_id: str, user: UserRecord = Depends(require_user)) -> BookingRecord:
+    return service.reject_booking(user, booking_id)
+
+
+@app.post("/api/bookings/{booking_id}/cancel", response_model=BookingRecord)
+def cancel_booking(booking_id: str, user: UserRecord = Depends(require_user)) -> BookingRecord:
+    return service.cancel_booking(user, booking_id)
+
+
+@app.post("/api/desk-releases/manual")
+def upsert_manual_release(payload: ManualReleaseUpsert, user: UserRecord = Depends(require_user)) -> dict[str, str]:
+    return service.upsert_manual_release(user, payload)
+
+
+@app.get("/api/desk-releases/recurring", response_model=list[RecurringReleaseRecord])
+def list_recurring_releases(user: UserRecord = Depends(require_user)) -> list[RecurringReleaseRecord]:
+    return service.list_recurring_releases(user)
+
+
+@app.post("/api/desk-releases/recurring", response_model=RecurringReleaseRecord)
+def upsert_recurring_release(
+    payload: RecurringReleaseUpsert,
+    user: UserRecord = Depends(require_user),
+) -> RecurringReleaseRecord:
+    return service.upsert_recurring_release(user, payload)
+
+
+@app.get("/api/preferred-partners", response_model=list[PreferredPartnerRecord])
+def list_preferred_partners(user: UserRecord = Depends(require_user)) -> list[PreferredPartnerRecord]:
+    return service.list_preferred_partners(user)
+
+
+@app.post("/api/preferred-partners", response_model=PreferredPartnerRecord)
+def create_preferred_partner(
+    payload: PreferredPartnerUpsert,
+    user: UserRecord = Depends(require_user),
+) -> PreferredPartnerRecord:
+    return service.create_preferred_partner(user, payload)
+
+
+@app.delete("/api/preferred-partners/{preferred_partner_id}")
+def delete_preferred_partner(preferred_partner_id: str, user: UserRecord = Depends(require_user)) -> dict[str, str]:
+    return service.delete_preferred_partner(user, preferred_partner_id)
+
+
+@app.get("/api/notifications")
+def list_notifications(user: UserRecord = Depends(require_user)):
+    return service.list_notifications(user)
+
+
+@app.post("/api/notifications/{notification_id}/read")
+def mark_notification_read(notification_id: str, user: UserRecord = Depends(require_user)) -> dict[str, str]:
+    return service.mark_notification_read(user, notification_id)
+
+
+@app.get("/api/admin/users", response_model=list[UserRecord])
+def admin_list_users(user: UserRecord = Depends(require_user)) -> list[UserRecord]:
+    return service.list_users(user)
+
+
+@app.post("/api/admin/users", response_model=UserRecord)
+def admin_upsert_user(payload: AdminUserUpsert, user: UserRecord = Depends(require_user)) -> UserRecord:
+    return service.admin_upsert_user(user, payload)
+
+
+@app.get("/api/admin/whitelist", response_model=list[WhitelistEntry])
+def admin_list_whitelist(user: UserRecord = Depends(require_user)) -> list[WhitelistEntry]:
+    return service.list_whitelist(user)
+
+
+@app.post("/api/admin/whitelist", response_model=WhitelistEntry)
+def admin_upsert_whitelist(payload: WhitelistUpsert, user: UserRecord = Depends(require_user)) -> WhitelistEntry:
+    return service.admin_upsert_whitelist(user, payload)
+
+
+@app.delete("/api/admin/whitelist/{whitelist_id}")
+def admin_delete_whitelist(whitelist_id: str, user: UserRecord = Depends(require_user)) -> dict[str, str]:
+    return service.admin_delete_whitelist(user, whitelist_id)
+
+
+@app.post("/api/admin/locations", response_model=LocationRecord)
+def admin_upsert_location(payload: AdminLocationUpsert, user: UserRecord = Depends(require_user)) -> LocationRecord:
+    return service.admin_upsert_location(user, payload)
+
+
+@app.post("/api/admin/floors", response_model=FloorRecord)
+def admin_upsert_floor(payload: AdminFloorUpsert, user: UserRecord = Depends(require_user)) -> FloorRecord:
+    return service.admin_upsert_floor(user, payload)
+
+
+@app.post("/api/admin/desks", response_model=DeskRecord)
+def admin_upsert_desk(payload: AdminDeskUpsert, user: UserRecord = Depends(require_user)) -> DeskRecord:
+    return service.admin_upsert_desk(user, payload)
 
 
 @app.get("/api/admin/stats", response_model=StatsResponse)
 def admin_stats(user: UserRecord = Depends(require_user)) -> StatsResponse:
-    return StatsResponse(**service.admin_stats(actor=user))
+    return service.admin_stats(user)
+
+
+@app.get("/api/admin/audit-log")
+def admin_audit_log(user: UserRecord = Depends(require_user)):
+    return service.list_audit_log(user)

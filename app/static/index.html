@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Desk Reservation</title>
+    <title>MarlogSpace</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
@@ -12,128 +12,158 @@
 
     <header class="topbar">
       <div>
-        <h1>Desk Reservation</h1>
-        <p>Sun-Thu | AM 08:00-12:30 | PM 12:30-17:00</p>
+        <h1>MarlogSpace</h1>
+        <p>Desk ownership, releases, approvals, and office maps</p>
       </div>
-      <div id="sessionBadge" class="session-badge hidden"></div>
+      <div class="row">
+        <div id="sessionBadge" class="session-badge hidden"></div>
+        <button id="logoutBtn" class="btn hidden">Logout</button>
+      </div>
     </header>
 
     <main class="layout">
       <section id="authCard" class="card">
         <h2>Sign In</h2>
-        <p>Enter your name to continue.</p>
-        <label>Name</label>
-        <input id="nameInput" type="text" maxlength="64" placeholder="Your name" />
+        <p>Use your whitelisted email to receive a one-time code.</p>
+        <label>Email</label>
+        <input id="emailInput" type="email" placeholder="you@ide-tech.com" />
         <div class="row">
-          <button id="loginBtn" class="btn btn-primary">Login</button>
+          <button id="requestOtpBtn" class="btn btn-primary">Send OTP</button>
+        </div>
+        <label>Code</label>
+        <input id="otpInput" type="text" maxlength="6" placeholder="6-digit code" />
+        <div class="row">
+          <button id="verifyOtpBtn" class="btn">Verify Code</button>
         </div>
         <p id="authMessage" class="message"></p>
       </section>
 
       <section id="appCard" class="card hidden">
-        <div class="row row-space">
-          <h2>Reservations</h2>
-          <button id="logoutBtn" class="btn">Logout</button>
-        </div>
-
-        <div class="toolbar">
-          <label>Date</label>
-          <input id="dateInput" type="date" />
-
-          <label>Slot</label>
-          <select id="slotInput">
-            <option value="FULL" selected>FULL</option>
-            <option value="AM">AM</option>
-            <option value="PM">PM</option>
-          </select>
-
-          <label>Desk</label>
-          <select id="deskInput"></select>
-
-          <button id="bookBtn" class="btn btn-primary">Book</button>
-        </div>
-
+        <div id="tabBar" class="tab-bar"></div>
         <p id="appMessage" class="message"></p>
 
-        <div class="panel">
-          <h3>Calendar</h3>
-          <div id="calendarStrip" class="calendar-strip"></div>
-        </div>
-
-        <div class="panel">
-          <h3>Desk Layout (Selected Date)</h3>
-          <div class="legend">
-            <span><i class="dot dot-free"></i> Free</span>
-            <span><i class="dot dot-manual"></i> Reserved</span>
-            <span><i class="dot dot-auto"></i> Auto (named desk)</span>
-          </div>
-          <div id="deskMap" class="desk-map"></div>
-        </div>
-
-        <div class="panel">
-          <h3>My Explicit Reservations</h3>
-          <ul id="myReservations" class="list"></ul>
-        </div>
-
-        <div class="panel">
-          <h3>Named Desk Release</h3>
+        <section id="screen-map" class="screen">
           <div class="toolbar">
-            <label>Desk</label>
-            <select id="absenceDeskInput"></select>
-            <label>Date</label>
-            <input id="absenceDateInput" type="date" />
-            <label>Slot</label>
-            <select id="absenceSlotInput">
-              <option value="FULL" selected>FULL</option>
-              <option value="AM">AM</option>
-              <option value="PM">PM</option>
-            </select>
-            <label>State</label>
-            <select id="absenceStateInput">
-              <option value="true">Released</option>
-              <option value="false">Not Released</option>
-            </select>
-            <button id="saveAbsenceBtn" class="btn">Save</button>
-          </div>
-        </div>
-
-        <div id="adminPanel" class="panel hidden">
-          <h3>Admin</h3>
-          <div id="adminStats" class="stats"></div>
-          <div class="grid-two">
             <div>
-              <h4>Upsert User</h4>
-              <label>Name</label>
-              <input id="adminUserName" type="text" placeholder="User name" />
-              <label>Enabled</label>
-              <select id="adminUserEnabled">
-                <option value="true">true</option>
-                <option value="false">false</option>
-              </select>
-              <label>Admin</label>
-              <select id="adminUserAdmin">
-                <option value="false">false</option>
-                <option value="true">true</option>
-              </select>
-              <button id="saveUserBtn" class="btn">Save User</button>
+              <label>Location</label>
+              <select id="locationInput"></select>
             </div>
             <div>
-              <h4>Upsert Desk</h4>
-              <label>Desk ID (blank=create)</label>
-              <input id="adminDeskId" type="text" />
-              <label>Label</label>
-              <input id="adminDeskLabel" type="text" placeholder="Desk A1" />
-              <label>Enabled</label>
-              <select id="adminDeskEnabled">
-                <option value="true">true</option>
-                <option value="false">false</option>
+              <label>Floor</label>
+              <select id="floorInput"></select>
+            </div>
+            <div>
+              <label>Date</label>
+              <input id="dateInput" type="date" />
+            </div>
+            <div>
+              <label>Slot</label>
+              <select id="slotInput">
+                <option value="FULL">FULL</option>
+                <option value="AM">AM</option>
+                <option value="PM">PM</option>
               </select>
-              <label>Owner User ID (optional)</label>
-              <input id="adminDeskOwner" type="text" />
+            </div>
+          </div>
+          <div class="panel">
+            <div class="legend">
+              <span><i class="dot dot-free"></i> Free</span>
+              <span><i class="dot dot-pending"></i> Pending</span>
+              <span><i class="dot dot-manual"></i> Booked</span>
+              <span><i class="dot dot-auto"></i> Owned</span>
+              <span><i class="dot dot-blocked"></i> Blocked</span>
+            </div>
+            <div id="deskMap" class="desk-map-canvas"></div>
+          </div>
+        </section>
+
+        <section id="screen-bookings" class="screen hidden">
+          <div class="panel">
+            <h3>My / Visible Bookings</h3>
+            <ul id="bookingList" class="list"></ul>
+          </div>
+        </section>
+
+        <section id="screen-release" class="screen hidden">
+          <div class="grid-two">
+            <div class="panel">
+              <h3>Manual Release</h3>
+              <label>Desk</label>
+              <select id="releaseDeskInput"></select>
+              <label>Date</label>
+              <input id="releaseDateInput" type="date" />
+              <label>Slot</label>
+              <select id="releaseSlotInput">
+                <option value="FULL">FULL</option>
+                <option value="AM">AM</option>
+                <option value="PM">PM</option>
+              </select>
+              <button id="saveReleaseBtn" class="btn">Save Release</button>
+            </div>
+            <div class="panel">
+              <h3>Recurring Release</h3>
+              <label>Desk</label>
+              <select id="recurringDeskInput"></select>
+              <label>Weekday</label>
+              <select id="weekdayInput">
+                <option value="6">Sunday</option>
+                <option value="0">Monday</option>
+                <option value="1">Tuesday</option>
+                <option value="2">Wednesday</option>
+                <option value="3">Thursday</option>
+              </select>
+              <label>Slot</label>
+              <select id="recurringSlotInput">
+                <option value="FULL">FULL</option>
+                <option value="AM">AM</option>
+                <option value="PM">PM</option>
+              </select>
+              <button id="saveRecurringBtn" class="btn">Save Recurring</button>
+              <ul id="recurringList" class="list"></ul>
+            </div>
+          </div>
+        </section>
+
+        <section id="screen-notifications" class="screen hidden">
+          <div class="panel">
+            <h3>Notifications</h3>
+            <ul id="notificationList" class="list"></ul>
+          </div>
+        </section>
+
+        <section id="screen-admin" class="screen hidden">
+          <div class="panel">
+            <h3>Admin Stats</h3>
+            <div id="adminStats" class="stats"></div>
+          </div>
+          <div class="grid-two">
+            <div class="panel">
+              <h3>Whitelist</h3>
+              <label>Email</label>
+              <input id="whitelistEmail" type="email" />
+              <button id="saveWhitelistBtn" class="btn">Add Whitelist Email</button>
+              <ul id="whitelistList" class="list"></ul>
+            </div>
+            <div class="panel">
+              <h3>Desk Editor</h3>
+              <label>Desk ID (blank=create)</label>
+              <input id="deskIdInput" type="text" />
+              <label>Label</label>
+              <input id="deskLabelInput" type="text" />
+              <label>Owner User ID</label>
+              <input id="deskOwnerInput" type="text" />
+              <label>X</label>
+              <input id="deskXInput" type="number" value="10" />
+              <label>Y</label>
+              <input id="deskYInput" type="number" value="10" />
               <button id="saveDeskBtn" class="btn">Save Desk</button>
             </div>
           </div>
-        </div>
+          <div class="panel">
+            <h3>Audit Log</h3>
+            <ul id="auditList" class="list"></ul>
+          </div>
+        </section>
       </section>
     </main>
 

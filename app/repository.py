@@ -1,349 +1,644 @@
 from __future__ import annotations
 
-import shutil
+import json
+import sqlite3
 import uuid
-from dataclasses import dataclass
+from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
-from tempfile import NamedTemporaryFile
-from typing import Any, Callable
+from typing import Any, Iterable
 
-from filelock import FileLock
-from openpyxl import Workbook, load_workbook
+from openpyxl import load_workbook
 
 from app.config import settings
-from app.constants import (
-    ABSENCES_HEADERS,
-    DESKS_HEADERS,
-    META_HEADERS,
-    RESERVATIONS_HEADERS,
-    USERS_HEADERS,
+from app.constants import BOOKING_APPROVED, ROLE_ADMIN, ROLE_USER
+from app.models import (
+    AuditEntry,
+    BookingRecord,
+    DeskRecord,
+    FloorRecord,
+    LocationRecord,
+    NotificationRecord,
+    PreferredPartnerRecord,
+    RecurringReleaseRecord,
+    UserRecord,
+    WhitelistEntry,
 )
-from app.domain import normalize_bool
-from app.models import AbsenceRecord, DeskRecord, ReservationRecord, UserRecord
 
 
-@dataclass
-class Tables:
-    users: list[dict[str, Any]]
-    desks: list[dict[str, Any]]
-    reservations: list[dict[str, Any]]
-    absences: list[dict[str, Any]]
-    meta: list[dict[str, Any]]
+def _utcnow() -> datetime:
+    return datetime.utcnow()
 
 
-class ExcelRepository:
-    def __init__(self) -> None:
-        self.data_file = settings.data_file
-        self.backup_dir = settings.backup_dir
-        self.lock = FileLock(str(settings.lock_file))
+def _iso_now() -> str:
+    return _utcnow().isoformat()
+
+
+class SQLiteRepository:
+    def __init__(self, db_file: Path | None = None, legacy_excel_file: Path | None = None) -> None:
+        self.db_file = db_file or settings.db_file
+        self.legacy_excel_file = legacy_excel_file or settings.legacy_excel_file
+
+    @contextmanager
+    def connect(self):
+        self.db_file.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.db_file)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
 
     def init_storage(self) -> None:
-        self.data_file.parent.mkdir(parents=True, exist_ok=True)
-        self.backup_dir.mkdir(parents=True, exist_ok=True)
-        settings.lock_file.parent.mkdir(parents=True, exist_ok=True)
-        if self.data_file.exists():
-            return
-
-        wb = Workbook()
-        default = wb.active
-        wb.remove(default)
-        for sheet_name, headers in self._sheet_headers().items():
-            ws = wb.create_sheet(sheet_name)
-            ws.append(headers)
-        wb.save(self.data_file)
-
-    def list_users(self) -> list[UserRecord]:
-        tables = self._read_tables()
-        return [
-            UserRecord(
-                user_id=row["user_id"],
-                name=self._normalize_user_name(row),
-                email=row.get("email") or None,
-                enabled=normalize_bool(row["enabled"]),
-                is_admin=normalize_bool(row["is_admin"]),
-                created_at=self._parse_datetime(row["created_at"]),
+        with self.connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    email TEXT NOT NULL UNIQUE,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    location TEXT,
+                    department TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS auth_whitelist (
+                    whitelist_id TEXT PRIMARY KEY,
+                    email TEXT NOT NULL UNIQUE,
+                    user_id TEXT,
+                    added_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS otp_codes (
+                    email TEXT PRIMARY KEY,
+                    code TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    attempts_left INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS sessions (
+                    token TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS locations (
+                    location_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS floors (
+                    floor_id TEXT PRIMARY KEY,
+                    location_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(location_id, name),
+                    FOREIGN KEY(location_id) REFERENCES locations(location_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS desks (
+                    desk_id TEXT PRIMARY KEY,
+                    floor_id TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    owner_user_id TEXT,
+                    is_blocked INTEGER NOT NULL DEFAULT 0,
+                    x INTEGER NOT NULL DEFAULT 0,
+                    y INTEGER NOT NULL DEFAULT 0,
+                    zone TEXT,
+                    equipment_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(floor_id) REFERENCES floors(floor_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS manual_releases (
+                    manual_release_id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL,
+                    desk_id TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    slot TEXT NOT NULL,
+                    released INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(desk_id, date, slot),
+                    FOREIGN KEY(owner_user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                    FOREIGN KEY(desk_id) REFERENCES desks(desk_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS recurring_releases (
+                    recurring_release_id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL,
+                    desk_id TEXT NOT NULL,
+                    weekday INTEGER NOT NULL,
+                    slot TEXT NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(desk_id, weekday, slot),
+                    FOREIGN KEY(owner_user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                    FOREIGN KEY(desk_id) REFERENCES desks(desk_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS preferred_partners (
+                    preferred_partner_id TEXT PRIMARY KEY,
+                    desk_id TEXT NOT NULL,
+                    owner_user_id TEXT NOT NULL,
+                    partner_user_id TEXT NOT NULL,
+                    auto_approve INTEGER NOT NULL DEFAULT 1,
+                    priority INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(desk_id, partner_user_id),
+                    FOREIGN KEY(desk_id) REFERENCES desks(desk_id) ON DELETE CASCADE,
+                    FOREIGN KEY(owner_user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                    FOREIGN KEY(partner_user_id) REFERENCES users(user_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS booking_requests (
+                    booking_id TEXT PRIMARY KEY,
+                    requested_by TEXT NOT NULL,
+                    desk_id TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    slot TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    approval_type TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    acted_at TEXT,
+                    acted_by TEXT,
+                    FOREIGN KEY(requested_by) REFERENCES users(user_id) ON DELETE CASCADE,
+                    FOREIGN KEY(desk_id) REFERENCES desks(desk_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS booking_slots (
+                    booking_slot_id TEXT PRIMARY KEY,
+                    booking_id TEXT NOT NULL,
+                    desk_id TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    slot TEXT NOT NULL,
+                    FOREIGN KEY(booking_id) REFERENCES booking_requests(booking_id) ON DELETE CASCADE,
+                    FOREIGN KEY(desk_id) REFERENCES desks(desk_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS notifications (
+                    notification_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    read_at TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    audit_id TEXT PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    actor_user_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    entity_type TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    details TEXT NOT NULL
+                );
+                """
             )
-            for row in tables.users
-            if row.get("user_id")
-        ]
+        self._seed_defaults()
+        self.import_legacy_excel_if_needed()
 
-    def get_user_by_name(self, name: str) -> UserRecord | None:
-        normalized_name = name.strip().lower()
-        for user in self.list_users():
-            if user.name.strip().lower() == normalized_name:
-                return user
-        return None
+    def _seed_defaults(self) -> None:
+        if self.list_locations():
+            return
+        location = self.upsert_location("Haifa")
+        self.upsert_floor(location.location_id, "2")
 
-    def get_user_by_email(self, email: str) -> UserRecord | None:
-        normalized = email.lower()
-        for user in self.list_users():
-            if user.email and user.email.lower() == normalized:
-                return user
-        return None
+    def import_legacy_excel_if_needed(self) -> None:
+        if not self.legacy_excel_file.exists():
+            return
+        with self.connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()
+            if row["c"]:
+                return
+
+        wb = load_workbook(self.legacy_excel_file)
+        location = self.list_locations()[0]
+        floor = self.list_floors(location.location_id)[0]
+
+        users_sheet = wb["users"] if "users" in wb.sheetnames else None
+        desks_sheet = wb["desks"] if "desks" in wb.sheetnames else None
+        reservations_sheet = wb["reservations"] if "reservations" in wb.sheetnames else None
+        absences_sheet = wb["absences"] if "absences" in wb.sheetnames else None
+        user_map: dict[str, str] = {}
+
+        if users_sheet:
+            rows = list(users_sheet.iter_rows(values_only=True))
+            headers = [str(v) for v in rows[0]] if rows else []
+            for values in rows[1:]:
+                row = dict(zip(headers, values))
+                if not row.get("user_id") or not row.get("email"):
+                    continue
+                user = self.upsert_user(
+                    user_id=str(row["user_id"]),
+                    name=str(row.get("name") or row["email"]).split("@")[0].replace(".", " ").title(),
+                    email=str(row["email"]),
+                    enabled=bool(row.get("enabled", True)),
+                    is_admin=bool(row.get("is_admin", False)),
+                )
+                user_map[str(row["user_id"])] = user.user_id
+                self.upsert_whitelist(user.email, user.user_id, "legacy-import")
+
+        if desks_sheet:
+            rows = list(desks_sheet.iter_rows(values_only=True))
+            headers = [str(v) for v in rows[0]] if rows else []
+            index = 0
+            for values in rows[1:]:
+                row = dict(zip(headers, values))
+                if not row.get("desk_id"):
+                    continue
+                self.upsert_desk(
+                    desk_id=str(row["desk_id"]),
+                    floor_id=floor.floor_id,
+                    label=str(row.get("label") or f"Desk {index + 1}"),
+                    enabled=bool(row.get("enabled", True)),
+                    owner_user_id=user_map.get(str(row.get("owner_user_id"))) if row.get("owner_user_id") else None,
+                    is_blocked=False,
+                    x=(index % 4) * 22 + 10,
+                    y=(index // 4) * 24 + 12,
+                    zone=None,
+                    equipment={},
+                )
+                index += 1
+
+        if reservations_sheet:
+            rows = list(reservations_sheet.iter_rows(values_only=True))
+            headers = [str(v) for v in rows[0]] if rows else []
+            grouped: dict[tuple[str, str, str], list[str]] = {}
+            for values in rows[1:]:
+                row = dict(zip(headers, values))
+                if not row.get("reservation_id"):
+                    continue
+                user_id = user_map.get(str(row.get("user_id")))
+                if not user_id:
+                    continue
+                date_value = str(row["date"])
+                grouped.setdefault((user_id, str(row["desk_id"]), date_value), []).append(str(row["slot"]))
+            for (user_id, desk_id, date_value), slots in grouped.items():
+                slot = "FULL" if sorted(set(slots)) == ["AM", "PM"] else slots[0]
+                self.create_booking_request(
+                    requested_by=user_id,
+                    desk_id=desk_id,
+                    value_date=date.fromisoformat(date_value),
+                    request_slot=slot,
+                    status=BOOKING_APPROVED,
+                    approval_type="legacy_import",
+                )
+
+        if absences_sheet:
+            rows = list(absences_sheet.iter_rows(values_only=True))
+            headers = [str(v) for v in rows[0]] if rows else []
+            for values in rows[1:]:
+                row = dict(zip(headers, values))
+                if not row.get("desk_id") or not row.get("owner_user_id"):
+                    continue
+                owner_user_id = user_map.get(str(row["owner_user_id"]))
+                if not owner_user_id:
+                    continue
+                self.upsert_manual_release(
+                    owner_user_id=owner_user_id,
+                    desk_id=str(row["desk_id"]),
+                    value_date=date.fromisoformat(str(row["date"])),
+                    slot=str(row["slot"]),
+                    released=True,
+                )
+
+        self.create_audit_log("system", "legacy_import", "system", "legacy_excel", "Imported legacy workbook")
+
+    def _fetchone(self, query: str, params: Iterable[Any] = ()) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute(query, tuple(params)).fetchone()
+
+    def _fetchall(self, query: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute(query, tuple(params)).fetchall()
+
+    def _bool(self, value: Any) -> bool:
+        return bool(int(value)) if value is not None else False
+
+    def _user_from_row(self, row: sqlite3.Row) -> UserRecord:
+        return UserRecord(
+            user_id=row["user_id"],
+            name=row["name"],
+            email=row["email"],
+            enabled=self._bool(row["enabled"]),
+            is_admin=self._bool(row["is_admin"]),
+            location=row["location"],
+            department=row["department"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    def _location_from_row(self, row: sqlite3.Row) -> LocationRecord:
+        return LocationRecord(
+            location_id=row["location_id"],
+            name=row["name"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    def _floor_from_row(self, row: sqlite3.Row) -> FloorRecord:
+        return FloorRecord(
+            floor_id=row["floor_id"],
+            location_id=row["location_id"],
+            name=row["name"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    def _desk_from_row(self, row: sqlite3.Row) -> DeskRecord:
+        return DeskRecord(
+            desk_id=row["desk_id"],
+            floor_id=row["floor_id"],
+            label=row["label"],
+            enabled=self._bool(row["enabled"]),
+            owner_user_id=row["owner_user_id"],
+            is_blocked=self._bool(row["is_blocked"]),
+            x=int(row["x"]),
+            y=int(row["y"]),
+            zone=row["zone"],
+            equipment=json.loads(row["equipment_json"] or "{}"),
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    def list_users(self, include_disabled: bool = False) -> list[UserRecord]:
+        query = "SELECT * FROM users"
+        if not include_disabled:
+            query += " WHERE enabled = 1"
+        query += " ORDER BY name"
+        return [self._user_from_row(row) for row in self._fetchall(query)]
 
     def get_user(self, user_id: str) -> UserRecord | None:
-        for user in self.list_users():
-            if user.user_id == user_id:
-                return user
-        return None
+        row = self._fetchone("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        return self._user_from_row(row) if row else None
+
+    def get_user_by_email(self, email: str) -> UserRecord | None:
+        row = self._fetchone("SELECT * FROM users WHERE lower(email) = lower(?)", (email,))
+        return self._user_from_row(row) if row else None
 
     def upsert_user(
         self,
         name: str,
+        email: str,
         enabled: bool = True,
         is_admin: bool = False,
-        email: str | None = None,
+        location: str | None = None,
+        department: str | None = None,
+        user_id: str | None = None,
     ) -> UserRecord:
-        now = datetime.utcnow().isoformat()
-        normalized_name = name.strip()
-        normalized_email = email.lower().strip() if email else None
+        existing = self.get_user_by_email(email)
+        target_id = user_id or (existing.user_id if existing else uuid.uuid4().hex)
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO users (user_id, name, email, enabled, is_admin, location, department, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    name = excluded.name,
+                    email = excluded.email,
+                    enabled = excluded.enabled,
+                    is_admin = excluded.is_admin,
+                    location = excluded.location,
+                    department = excluded.department
+                """,
+                (
+                    target_id,
+                    name,
+                    email.lower(),
+                    int(enabled),
+                    int(is_admin),
+                    location,
+                    department,
+                    existing.created_at.isoformat() if existing else _iso_now(),
+                ),
+            )
+        return self.get_user(target_id)  # type: ignore[return-value]
 
-        def mutate(tables: Tables) -> dict[str, Any]:
-            for row in tables.users:
-                row_name = self._normalize_user_name(row)
-                if row_name.strip().lower() == normalized_name.lower():
-                    row["name"] = normalized_name
-                    if normalized_email is not None:
-                        row["email"] = normalized_email
-                    row["enabled"] = enabled
-                    row["is_admin"] = is_admin
-                    return row
-            row = {
-                "user_id": uuid.uuid4().hex,
-                "name": normalized_name,
-                "email": normalized_email,
-                "enabled": enabled,
-                "is_admin": is_admin,
-                "created_at": now,
-            }
-            tables.users.append(row)
-            return row
+    def list_whitelist(self) -> list[WhitelistEntry]:
+        rows = self._fetchall("SELECT * FROM auth_whitelist ORDER BY email")
+        return [
+            WhitelistEntry(
+                whitelist_id=row["whitelist_id"],
+                email=row["email"],
+                user_id=row["user_id"],
+                added_by=row["added_by"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in rows
+        ]
 
-        row = self._write_tables(mutate)
-        return UserRecord(
+    def email_allowed(self, email: str) -> bool:
+        row = self._fetchone(
+            "SELECT whitelist_id FROM auth_whitelist WHERE lower(email) = lower(?)",
+            (email,),
+        )
+        return row is not None
+
+    def upsert_whitelist(self, email: str, user_id: str | None, added_by: str) -> WhitelistEntry:
+        existing = self._fetchone(
+            "SELECT * FROM auth_whitelist WHERE lower(email) = lower(?)", (email,)
+        )
+        whitelist_id = existing["whitelist_id"] if existing else uuid.uuid4().hex
+        created_at = existing["created_at"] if existing else _iso_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO auth_whitelist (whitelist_id, email, user_id, added_by, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(whitelist_id) DO UPDATE SET
+                    email = excluded.email,
+                    user_id = excluded.user_id,
+                    added_by = excluded.added_by
+                """,
+                (whitelist_id, email.lower(), user_id, added_by, created_at),
+            )
+        row = self._fetchone("SELECT * FROM auth_whitelist WHERE whitelist_id = ?", (whitelist_id,))
+        assert row is not None
+        return WhitelistEntry(
+            whitelist_id=row["whitelist_id"],
+            email=row["email"],
             user_id=row["user_id"],
-            name=self._normalize_user_name(row),
-            email=row.get("email") or None,
-            enabled=normalize_bool(row["enabled"]),
-            is_admin=normalize_bool(row["is_admin"]),
-            created_at=self._parse_datetime(row["created_at"]),
+            added_by=row["added_by"],
+            created_at=datetime.fromisoformat(row["created_at"]),
         )
 
-    def list_desks(self) -> list[DeskRecord]:
-        tables = self._read_tables()
-        return [
-            DeskRecord(
-                desk_id=row["desk_id"],
-                label=row["label"],
-                enabled=normalize_bool(row["enabled"]),
-                owner_user_id=row.get("owner_user_id") or None,
+    def delete_whitelist(self, whitelist_id: str) -> bool:
+        with self.connect() as conn:
+            cur = conn.execute("DELETE FROM auth_whitelist WHERE whitelist_id = ?", (whitelist_id,))
+            return cur.rowcount > 0
+
+    def save_otp(self, email: str, code: str, expires_at: datetime, attempts_left: int) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO otp_codes (email, code, expires_at, attempts_left)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(email) DO UPDATE SET
+                    code = excluded.code,
+                    expires_at = excluded.expires_at,
+                    attempts_left = excluded.attempts_left
+                """,
+                (email.lower(), code, expires_at.isoformat(), attempts_left),
             )
-            for row in tables.desks
-            if row.get("desk_id")
-        ]
+
+    def get_otp(self, email: str) -> sqlite3.Row | None:
+        return self._fetchone("SELECT * FROM otp_codes WHERE lower(email) = lower(?)", (email,))
+
+    def decrement_otp_attempts(self, email: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE otp_codes SET attempts_left = attempts_left - 1 WHERE lower(email) = lower(?)",
+                (email,),
+            )
+
+    def delete_otp(self, email: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM otp_codes WHERE lower(email) = lower(?)", (email,))
+
+    def create_session(self, token: str, user_id: str, expires_at: datetime) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO sessions (token, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
+                (token, user_id, expires_at.isoformat(), _iso_now()),
+            )
+
+    def get_session(self, token: str) -> sqlite3.Row | None:
+        return self._fetchone("SELECT * FROM sessions WHERE token = ?", (token,))
+
+    def delete_session(self, token: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+
+    def list_locations(self) -> list[LocationRecord]:
+        return [self._location_from_row(row) for row in self._fetchall("SELECT * FROM locations ORDER BY name")]
+
+    def upsert_location(self, name: str, location_id: str | None = None) -> LocationRecord:
+        existing_by_name = self._fetchone("SELECT * FROM locations WHERE name = ?", (name,))
+        target_id = location_id or (existing_by_name["location_id"] if existing_by_name else uuid.uuid4().hex)
+        existing = self._fetchone("SELECT * FROM locations WHERE location_id = ?", (target_id,))
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO locations (location_id, name, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(location_id) DO UPDATE SET
+                    name = excluded.name
+                """,
+                (target_id, name, existing["created_at"] if existing else _iso_now()),
+            )
+        row = self._fetchone("SELECT * FROM locations WHERE location_id = ?", (target_id,))
+        assert row is not None
+        return self._location_from_row(row)
+
+    def list_floors(self, location_id: str | None = None) -> list[FloorRecord]:
+        if location_id:
+            rows = self._fetchall(
+                "SELECT * FROM floors WHERE location_id = ? ORDER BY name", (location_id,)
+            )
+        else:
+            rows = self._fetchall("SELECT * FROM floors ORDER BY name")
+        return [self._floor_from_row(row) for row in rows]
+
+    def get_floor(self, floor_id: str) -> FloorRecord | None:
+        row = self._fetchone("SELECT * FROM floors WHERE floor_id = ?", (floor_id,))
+        return self._floor_from_row(row) if row else None
+
+    def upsert_floor(self, location_id: str, name: str, floor_id: str | None = None) -> FloorRecord:
+        existing_by_name = self._fetchone(
+            "SELECT * FROM floors WHERE location_id = ? AND name = ?",
+            (location_id, name),
+        )
+        target_id = floor_id or (existing_by_name["floor_id"] if existing_by_name else uuid.uuid4().hex)
+        existing = self._fetchone("SELECT * FROM floors WHERE floor_id = ?", (target_id,))
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO floors (floor_id, location_id, name, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(floor_id) DO UPDATE SET
+                    location_id = excluded.location_id,
+                    name = excluded.name
+                """,
+                (target_id, location_id, name, existing["created_at"] if existing else _iso_now()),
+            )
+        row = self._fetchone("SELECT * FROM floors WHERE floor_id = ?", (target_id,))
+        assert row is not None
+        return self._floor_from_row(row)
+
+    def list_desks(self, location_id: str | None = None, floor_id: str | None = None) -> list[DeskRecord]:
+        query = """
+            SELECT d.* FROM desks d
+            JOIN floors f ON f.floor_id = d.floor_id
+            JOIN locations l ON l.location_id = f.location_id
+            WHERE 1 = 1
+        """
+        params: list[Any] = []
+        if floor_id:
+            query += " AND d.floor_id = ?"
+            params.append(floor_id)
+        if location_id:
+            query += " AND l.location_id = ?"
+            params.append(location_id)
+        query += " ORDER BY d.label"
+        return [self._desk_from_row(row) for row in self._fetchall(query, params)]
+
+    def get_desk(self, desk_id: str) -> DeskRecord | None:
+        row = self._fetchone("SELECT * FROM desks WHERE desk_id = ?", (desk_id,))
+        return self._desk_from_row(row) if row else None
 
     def upsert_desk(
         self,
+        floor_id: str,
         label: str,
-        enabled: bool = True,
-        owner_user_id: str | None = None,
+        enabled: bool,
+        owner_user_id: str | None,
+        is_blocked: bool,
+        x: int,
+        y: int,
+        zone: str | None,
+        equipment: dict[str, Any],
         desk_id: str | None = None,
     ) -> DeskRecord:
-        def mutate(tables: Tables) -> dict[str, Any]:
-            target_id = desk_id
-            if target_id:
-                for row in tables.desks:
-                    if row.get("desk_id") == target_id:
-                        row["label"] = label
-                        row["enabled"] = enabled
-                        row["owner_user_id"] = owner_user_id
-                        return row
-
-            new_row = {
-                "desk_id": target_id or uuid.uuid4().hex,
-                "label": label,
-                "enabled": enabled,
-                "owner_user_id": owner_user_id,
-            }
-            tables.desks.append(new_row)
-            return new_row
-
-        row = self._write_tables(mutate)
-        return DeskRecord(
-            desk_id=row["desk_id"],
-            label=row["label"],
-            enabled=normalize_bool(row["enabled"]),
-            owner_user_id=row.get("owner_user_id") or None,
-        )
-
-    def get_desk(self, desk_id: str) -> DeskRecord | None:
-        for desk in self.list_desks():
-            if desk.desk_id == desk_id:
-                return desk
-        return None
-
-    def list_reservations(
-        self,
-        start_date: date | None = None,
-        end_date: date | None = None,
-    ) -> list[ReservationRecord]:
-        tables = self._read_tables()
-        rows: list[ReservationRecord] = []
-        for row in tables.reservations:
-            if not row.get("reservation_id"):
-                continue
-            value_date = self._parse_date(row["date"])
-            if start_date and value_date < start_date:
-                continue
-            if end_date and value_date > end_date:
-                continue
-            rows.append(
-                ReservationRecord(
-                    reservation_id=row["reservation_id"],
-                    user_id=row["user_id"],
-                    desk_id=row["desk_id"],
-                    date=value_date,
-                    slot=row["slot"],
-                    created_at=self._parse_datetime(row["created_at"]),
-                    updated_at=self._parse_datetime(row["updated_at"]),
-                    auto=False,
-                )
+        target_id = desk_id or uuid.uuid4().hex
+        existing = self._fetchone("SELECT * FROM desks WHERE desk_id = ?", (target_id,))
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO desks (
+                    desk_id, floor_id, label, enabled, owner_user_id, is_blocked, x, y, zone, equipment_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(desk_id) DO UPDATE SET
+                    floor_id = excluded.floor_id,
+                    label = excluded.label,
+                    enabled = excluded.enabled,
+                    owner_user_id = excluded.owner_user_id,
+                    is_blocked = excluded.is_blocked,
+                    x = excluded.x,
+                    y = excluded.y,
+                    zone = excluded.zone,
+                    equipment_json = excluded.equipment_json
+                """,
+                (
+                    target_id,
+                    floor_id,
+                    label,
+                    int(enabled),
+                    owner_user_id,
+                    int(is_blocked),
+                    x,
+                    y,
+                    zone,
+                    json.dumps(equipment),
+                    existing["created_at"] if existing else _iso_now(),
+                ),
             )
-        return rows
+        return self.get_desk(target_id)  # type: ignore[return-value]
 
-    def get_reservation(self, reservation_id: str) -> ReservationRecord | None:
-        for item in self.list_reservations():
-            if item.reservation_id == reservation_id:
-                return item
-        return None
+    def list_manual_releases(self, desk_id: str | None = None, value_date: date | None = None) -> list[sqlite3.Row]:
+        query = "SELECT * FROM manual_releases WHERE 1 = 1"
+        params: list[Any] = []
+        if desk_id:
+            query += " AND desk_id = ?"
+            params.append(desk_id)
+        if value_date:
+            query += " AND date = ?"
+            params.append(value_date.isoformat())
+        return self._fetchall(query, params)
 
-    def create_reservation(self, user_id: str, desk_id: str, value_date: date, slot: str) -> ReservationRecord:
-        now = datetime.utcnow().isoformat()
-
-        def mutate(tables: Tables) -> dict[str, Any]:
-            for existing in tables.reservations:
-                if (
-                    self._parse_date(existing["date"]) == value_date
-                    and existing["slot"] == slot
-                    and existing["desk_id"] == desk_id
-                ):
-                    raise ValueError("Desk already reserved")
-                if (
-                    self._parse_date(existing["date"]) == value_date
-                    and existing["slot"] == slot
-                    and existing["user_id"] == user_id
-                ):
-                    raise ValueError("User already has a desk in this slot")
-            row = {
-                "reservation_id": uuid.uuid4().hex,
-                "user_id": user_id,
-                "desk_id": desk_id,
-                "date": value_date.isoformat(),
-                "slot": slot,
-                "created_at": now,
-                "updated_at": now,
-            }
-            tables.reservations.append(row)
-            return row
-
-        try:
-            row = self._write_tables(mutate)
-        except ValueError as exc:
-            raise ValueError(str(exc)) from exc
-        return ReservationRecord(
-            reservation_id=row["reservation_id"],
-            user_id=row["user_id"],
-            desk_id=row["desk_id"],
-            date=self._parse_date(row["date"]),
-            slot=row["slot"],
-            created_at=self._parse_datetime(row["created_at"]),
-            updated_at=self._parse_datetime(row["updated_at"]),
-            auto=False,
-        )
-
-    def update_reservation(
-        self,
-        reservation_id: str,
-        user_id: str,
-        desk_id: str,
-        value_date: date,
-        slot: str,
-    ) -> ReservationRecord | None:
-        now = datetime.utcnow().isoformat()
-
-        def mutate(tables: Tables) -> dict[str, Any] | None:
-            for existing in tables.reservations:
-                if existing.get("reservation_id") == reservation_id:
-                    continue
-                if (
-                    self._parse_date(existing["date"]) == value_date
-                    and existing["slot"] == slot
-                    and existing["desk_id"] == desk_id
-                ):
-                    raise ValueError("Desk already reserved")
-                if (
-                    self._parse_date(existing["date"]) == value_date
-                    and existing["slot"] == slot
-                    and existing["user_id"] == user_id
-                ):
-                    raise ValueError("User already has a desk in this slot")
-            for row in tables.reservations:
-                if row.get("reservation_id") == reservation_id:
-                    row["user_id"] = user_id
-                    row["desk_id"] = desk_id
-                    row["date"] = value_date.isoformat()
-                    row["slot"] = slot
-                    row["updated_at"] = now
-                    return row
-            return None
-
-        try:
-            row = self._write_tables(mutate)
-        except ValueError as exc:
-            raise ValueError(str(exc)) from exc
-        if not row:
-            return None
-        return ReservationRecord(
-            reservation_id=row["reservation_id"],
-            user_id=row["user_id"],
-            desk_id=row["desk_id"],
-            date=self._parse_date(row["date"]),
-            slot=row["slot"],
-            created_at=self._parse_datetime(row["created_at"]),
-            updated_at=self._parse_datetime(row["updated_at"]),
-            auto=False,
-        )
-
-    def delete_reservation(self, reservation_id: str) -> bool:
-        def mutate(tables: Tables) -> bool:
-            initial = len(tables.reservations)
-            tables.reservations = [
-                row for row in tables.reservations if row.get("reservation_id") != reservation_id
-            ]
-            return len(tables.reservations) != initial
-
-        return bool(self._write_tables(mutate))
-
-    def list_absences(self) -> list[AbsenceRecord]:
-        tables = self._read_tables()
-        rows: list[AbsenceRecord] = []
-        for row in tables.absences:
-            if not row.get("absence_id"):
-                continue
-            rows.append(
-                AbsenceRecord(
-                    absence_id=row["absence_id"],
-                    owner_user_id=row["owner_user_id"],
-                    desk_id=row["desk_id"],
-                    date=self._parse_date(row["date"]),
-                    slot=row["slot"],
-                    created_at=self._parse_datetime(row["created_at"]),
-                )
-            )
-        return rows
-
-    def upsert_absence(
+    def upsert_manual_release(
         self,
         owner_user_id: str,
         desk_id: str,
@@ -351,148 +646,387 @@ class ExcelRepository:
         slot: str,
         released: bool,
     ) -> None:
-        def mutate(tables: Tables) -> None:
-            matches = [
-                row
-                for row in tables.absences
-                if row.get("owner_user_id") == owner_user_id
-                and row.get("desk_id") == desk_id
-                and self._parse_date(str(row.get("date"))) == value_date
-                and row.get("slot") == slot
-            ]
-            if released and not matches:
-                tables.absences.append(
-                    {
-                        "absence_id": uuid.uuid4().hex,
-                        "owner_user_id": owner_user_id,
-                        "desk_id": desk_id,
-                        "date": value_date.isoformat(),
-                        "slot": slot,
-                        "created_at": datetime.utcnow().isoformat(),
-                    }
-                )
-            if not released and matches:
-                ids = {row.get("absence_id") for row in matches}
-                tables.absences = [
-                    row for row in tables.absences if row.get("absence_id") not in ids
-                ]
+        existing = self._fetchone(
+            "SELECT * FROM manual_releases WHERE desk_id = ? AND date = ? AND slot = ?",
+            (desk_id, value_date.isoformat(), slot),
+        )
+        manual_release_id = existing["manual_release_id"] if existing else uuid.uuid4().hex
+        created_at = existing["created_at"] if existing else _iso_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO manual_releases (manual_release_id, owner_user_id, desk_id, date, slot, released, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(desk_id, date, slot) DO UPDATE SET
+                    owner_user_id = excluded.owner_user_id,
+                    released = excluded.released
+                """,
+                (manual_release_id, owner_user_id, desk_id, value_date.isoformat(), slot, int(released), created_at),
+            )
 
-        self._write_tables(mutate)
+    def list_recurring_releases(self, desk_id: str | None = None, owner_user_id: str | None = None) -> list[RecurringReleaseRecord]:
+        query = "SELECT * FROM recurring_releases WHERE 1 = 1"
+        params: list[Any] = []
+        if desk_id:
+            query += " AND desk_id = ?"
+            params.append(desk_id)
+        if owner_user_id:
+            query += " AND owner_user_id = ?"
+            params.append(owner_user_id)
+        rows = self._fetchall(query, params)
+        return [
+            RecurringReleaseRecord(
+                recurring_release_id=row["recurring_release_id"],
+                owner_user_id=row["owner_user_id"],
+                desk_id=row["desk_id"],
+                weekday=int(row["weekday"]),
+                slot=row["slot"],
+                is_active=self._bool(row["is_active"]),
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in rows
+        ]
+
+    def upsert_recurring_release(
+        self,
+        owner_user_id: str,
+        desk_id: str,
+        weekday: int,
+        slot: str,
+        is_active: bool,
+        recurring_release_id: str | None = None,
+    ) -> RecurringReleaseRecord:
+        existing = self._fetchone(
+            "SELECT * FROM recurring_releases WHERE recurring_release_id = ?",
+            (recurring_release_id,),
+        ) if recurring_release_id else None
+        target_id = recurring_release_id or uuid.uuid4().hex
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO recurring_releases (
+                    recurring_release_id, owner_user_id, desk_id, weekday, slot, is_active, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(recurring_release_id) DO UPDATE SET
+                    owner_user_id = excluded.owner_user_id,
+                    desk_id = excluded.desk_id,
+                    weekday = excluded.weekday,
+                    slot = excluded.slot,
+                    is_active = excluded.is_active
+                """,
+                (
+                    target_id,
+                    owner_user_id,
+                    desk_id,
+                    weekday,
+                    slot,
+                    int(is_active),
+                    existing["created_at"] if existing else _iso_now(),
+                ),
+            )
+        return self.list_recurring_releases()[0] if False else next(
+            item for item in self.list_recurring_releases(desk_id=desk_id, owner_user_id=owner_user_id) if item.recurring_release_id == target_id
+        )
+
+    def list_preferred_partners(
+        self,
+        desk_id: str | None = None,
+        owner_user_id: str | None = None,
+    ) -> list[PreferredPartnerRecord]:
+        query = "SELECT * FROM preferred_partners WHERE 1 = 1"
+        params: list[Any] = []
+        if desk_id:
+            query += " AND desk_id = ?"
+            params.append(desk_id)
+        if owner_user_id:
+            query += " AND owner_user_id = ?"
+            params.append(owner_user_id)
+        rows = self._fetchall(query, params)
+        return [
+            PreferredPartnerRecord(
+                preferred_partner_id=row["preferred_partner_id"],
+                desk_id=row["desk_id"],
+                owner_user_id=row["owner_user_id"],
+                partner_user_id=row["partner_user_id"],
+                auto_approve=self._bool(row["auto_approve"]),
+                priority=self._bool(row["priority"]),
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in rows
+        ]
+
+    def create_preferred_partner(
+        self,
+        desk_id: str,
+        owner_user_id: str,
+        partner_user_id: str,
+        auto_approve: bool,
+        priority: bool,
+    ) -> PreferredPartnerRecord:
+        existing = self._fetchone(
+            "SELECT * FROM preferred_partners WHERE desk_id = ? AND partner_user_id = ?",
+            (desk_id, partner_user_id),
+        )
+        preferred_partner_id = existing["preferred_partner_id"] if existing else uuid.uuid4().hex
+        created_at = existing["created_at"] if existing else _iso_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO preferred_partners (
+                    preferred_partner_id, desk_id, owner_user_id, partner_user_id, auto_approve, priority, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(desk_id, partner_user_id) DO UPDATE SET
+                    owner_user_id = excluded.owner_user_id,
+                    auto_approve = excluded.auto_approve,
+                    priority = excluded.priority
+                """,
+                (
+                    preferred_partner_id,
+                    desk_id,
+                    owner_user_id,
+                    partner_user_id,
+                    int(auto_approve),
+                    int(priority),
+                    created_at,
+                ),
+            )
+        return next(
+            item
+            for item in self.list_preferred_partners(desk_id=desk_id, owner_user_id=owner_user_id)
+            if item.preferred_partner_id == preferred_partner_id
+        )
+
+    def delete_preferred_partner(self, preferred_partner_id: str) -> bool:
+        with self.connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM preferred_partners WHERE preferred_partner_id = ?",
+                (preferred_partner_id,),
+            )
+            return cur.rowcount > 0
+
+    def create_booking_request(
+        self,
+        requested_by: str,
+        desk_id: str,
+        value_date: date,
+        request_slot: str,
+        status: str,
+        approval_type: str,
+        acted_by: str | None = None,
+    ) -> BookingRecord:
+        booking_id = uuid.uuid4().hex
+        created_at = _utcnow()
+        acted_at = created_at if status != "pending" else None
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO booking_requests (
+                    booking_id, requested_by, desk_id, date, slot, status, approval_type, created_at, acted_at, acted_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    booking_id,
+                    requested_by,
+                    desk_id,
+                    value_date.isoformat(),
+                    request_slot,
+                    status,
+                    approval_type,
+                    created_at.isoformat(),
+                    acted_at.isoformat() if acted_at else None,
+                    acted_by,
+                ),
+            )
+            from app.domain import expand_request_slot
+
+            for slot in expand_request_slot(request_slot):
+                conn.execute(
+                    """
+                    INSERT INTO booking_slots (booking_slot_id, booking_id, desk_id, date, slot)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (uuid.uuid4().hex, booking_id, desk_id, value_date.isoformat(), slot),
+                )
+        return self.get_booking_request(booking_id)  # type: ignore[return-value]
+
+    def get_booking_request(self, booking_id: str) -> BookingRecord | None:
+        row = self._fetchone("SELECT * FROM booking_requests WHERE booking_id = ?", (booking_id,))
+        if not row:
+            return None
+        return BookingRecord(
+            booking_id=row["booking_id"],
+            requested_by=row["requested_by"],
+            desk_id=row["desk_id"],
+            date=date.fromisoformat(row["date"]),
+            slot=row["slot"],
+            status=row["status"],
+            approval_type=row["approval_type"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            acted_at=datetime.fromisoformat(row["acted_at"]) if row["acted_at"] else None,
+            acted_by=row["acted_by"],
+        )
+
+    def list_booking_requests(
+        self,
+        requested_by: str | None = None,
+        status: str | None = None,
+    ) -> list[BookingRecord]:
+        query = "SELECT * FROM booking_requests WHERE 1 = 1"
+        params: list[Any] = []
+        if requested_by:
+            query += " AND requested_by = ?"
+            params.append(requested_by)
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY date, created_at"
+        rows = self._fetchall(query, params)
+        return [self.get_booking_request(row["booking_id"]) for row in rows if self.get_booking_request(row["booking_id"])]  # type: ignore[list-item]
+
+    def update_booking_status(self, booking_id: str, status: str, acted_by: str, approval_type: str) -> BookingRecord | None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE booking_requests
+                SET status = ?, acted_by = ?, approval_type = ?, acted_at = ?
+                WHERE booking_id = ?
+                """,
+                (status, acted_by, approval_type, _iso_now(), booking_id),
+            )
+        return self.get_booking_request(booking_id)
+
+    def approved_slots_for_date(self, value_date: date, floor_id: str | None = None) -> list[sqlite3.Row]:
+        query = """
+            SELECT bs.*, br.requested_by
+            FROM booking_slots bs
+            JOIN booking_requests br ON br.booking_id = bs.booking_id
+            JOIN desks d ON d.desk_id = bs.desk_id
+            WHERE br.status = ? AND bs.date = ?
+        """
+        params: list[Any] = [BOOKING_APPROVED, value_date.isoformat()]
+        if floor_id:
+            query += " AND d.floor_id = ?"
+            params.append(floor_id)
+        return self._fetchall(query, params)
+
+    def pending_requests_for_date(self, value_date: date, floor_id: str | None = None) -> list[sqlite3.Row]:
+        query = """
+            SELECT br.* FROM booking_requests br
+            JOIN desks d ON d.desk_id = br.desk_id
+            WHERE br.status = 'pending' AND br.date = ?
+        """
+        params: list[Any] = [value_date.isoformat()]
+        if floor_id:
+            query += " AND d.floor_id = ?"
+            params.append(floor_id)
+        return self._fetchall(query, params)
+
+    def list_notifications(self, user_id: str) -> list[NotificationRecord]:
+        rows = self._fetchall(
+            "SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,),
+        )
+        return [
+            NotificationRecord(
+                notification_id=row["notification_id"],
+                user_id=row["user_id"],
+                type=row["type"],
+                message=row["message"],
+                read_at=datetime.fromisoformat(row["read_at"]) if row["read_at"] else None,
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in rows
+        ]
+
+    def create_notification(self, user_id: str, type_: str, message: str) -> NotificationRecord:
+        notification_id = uuid.uuid4().hex
+        created_at = _iso_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO notifications (notification_id, user_id, type, message, read_at, created_at)
+                VALUES (?, ?, ?, ?, NULL, ?)
+                """,
+                (notification_id, user_id, type_, message, created_at),
+            )
+        return self.list_notifications(user_id)[0]
+
+    def mark_notification_read(self, notification_id: str, user_id: str) -> bool:
+        with self.connect() as conn:
+            cur = conn.execute(
+                "UPDATE notifications SET read_at = ? WHERE notification_id = ? AND user_id = ?",
+                (_iso_now(), notification_id, user_id),
+            )
+            return cur.rowcount > 0
+
+    def create_audit_log(self, actor_user_id: str, action: str, entity_type: str, entity_id: str, details: str) -> AuditEntry:
+        audit_id = uuid.uuid4().hex
+        timestamp = _iso_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO audit_log (audit_id, timestamp, actor_user_id, action, entity_type, entity_id, details)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (audit_id, timestamp, actor_user_id, action, entity_type, entity_id, details),
+            )
+        return AuditEntry(
+            audit_id=audit_id,
+            timestamp=datetime.fromisoformat(timestamp),
+            actor_user_id=actor_user_id,
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            details=details,
+        )
+
+    def list_audit_log(self, limit: int = 200) -> list[AuditEntry]:
+        rows = self._fetchall(
+            "SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT ?",
+            (limit,),
+        )
+        return [
+            AuditEntry(
+                audit_id=row["audit_id"],
+                timestamp=datetime.fromisoformat(row["timestamp"]),
+                actor_user_id=row["actor_user_id"],
+                action=row["action"],
+                entity_type=row["entity_type"],
+                entity_id=row["entity_id"],
+                details=row["details"],
+            )
+            for row in rows
+        ]
 
     def stats(self) -> dict[str, int]:
-        users = self.list_users()
-        desks = self.list_desks()
-        reservations = self.list_reservations()
+        with self.connect() as conn:
+            total_bookings = conn.execute("SELECT COUNT(*) AS c FROM booking_requests").fetchone()["c"]
+            active_users = conn.execute("SELECT COUNT(*) AS c FROM users WHERE enabled = 1").fetchone()["c"]
+            enabled_desks = conn.execute("SELECT COUNT(*) AS c FROM desks WHERE enabled = 1").fetchone()["c"]
+            pending_bookings = conn.execute(
+                "SELECT COUNT(*) AS c FROM booking_requests WHERE status = 'pending'"
+            ).fetchone()["c"]
+            locations = conn.execute("SELECT COUNT(*) AS c FROM locations").fetchone()["c"]
         return {
-            "total_reservations": len(reservations),
-            "active_users": len([u for u in users if u.enabled]),
-            "enabled_desks": len([d for d in desks if d.enabled]),
+            "total_bookings": int(total_bookings),
+            "active_users": int(active_users),
+            "enabled_desks": int(enabled_desks),
+            "pending_bookings": int(pending_bookings),
+            "locations": int(locations),
         }
 
-    def _sheet_headers(self) -> dict[str, list[str]]:
-        return {
-            "users": USERS_HEADERS,
-            "desks": DESKS_HEADERS,
-            "reservations": RESERVATIONS_HEADERS,
-            "absences": ABSENCES_HEADERS,
-            "meta": META_HEADERS,
-        }
-
-    def _read_tables(self) -> Tables:
-        self.init_storage()
-        wb = load_workbook(self.data_file)
-        try:
-            return Tables(
-                users=self._read_sheet(wb, "users", USERS_HEADERS),
-                desks=self._read_sheet(wb, "desks", DESKS_HEADERS),
-                reservations=self._read_sheet(wb, "reservations", RESERVATIONS_HEADERS),
-                absences=self._read_sheet(wb, "absences", ABSENCES_HEADERS),
-                meta=self._read_sheet(wb, "meta", META_HEADERS),
-            )
-        finally:
-            wb.close()
-
-    def _write_tables(self, mutator: Callable[[Tables], Any]) -> Any:
-        self.init_storage()
-        with self.lock:
-            wb = load_workbook(self.data_file)
-            try:
-                tables = Tables(
-                    users=self._read_sheet(wb, "users", USERS_HEADERS),
-                    desks=self._read_sheet(wb, "desks", DESKS_HEADERS),
-                    reservations=self._read_sheet(wb, "reservations", RESERVATIONS_HEADERS),
-                    absences=self._read_sheet(wb, "absences", ABSENCES_HEADERS),
-                    meta=self._read_sheet(wb, "meta", META_HEADERS),
-                )
-                result = mutator(tables)
-                self._write_sheet(wb, "users", USERS_HEADERS, tables.users)
-                self._write_sheet(wb, "desks", DESKS_HEADERS, tables.desks)
-                self._write_sheet(wb, "reservations", RESERVATIONS_HEADERS, tables.reservations)
-                self._write_sheet(wb, "absences", ABSENCES_HEADERS, tables.absences)
-                self._write_sheet(wb, "meta", META_HEADERS, tables.meta)
-                self._persist_workbook(wb)
-                return result
-            finally:
-                wb.close()
-
-    def _persist_workbook(self, workbook: Workbook) -> None:
-        with NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
-            temp_path = Path(tmp.name)
-        try:
-            workbook.save(temp_path)
-            if self.data_file.exists():
-                stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
-                backup_path = self.backup_dir / f"reservations-{stamp}.xlsx"
-                shutil.copy2(self.data_file, backup_path)
-            temp_path.replace(self.data_file)
-        finally:
-            if temp_path.exists():
-                temp_path.unlink(missing_ok=True)
-
-    def _read_sheet(self, workbook: Workbook, name: str, headers: list[str]) -> list[dict[str, Any]]:
-        ws = workbook[name]
-        rows: list[dict[str, Any]] = []
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            if all(item is None for item in row):
-                continue
-            payload: dict[str, Any] = {}
-            for index, header in enumerate(headers):
-                payload[header] = row[index] if index < len(row) else None
-            rows.append(payload)
-        return rows
-
-    def _write_sheet(
-        self,
-        workbook: Workbook,
-        name: str,
-        headers: list[str],
-        rows: list[dict[str, Any]],
-    ) -> None:
-        if name not in workbook.sheetnames:
-            workbook.create_sheet(name)
-        ws = workbook[name]
-        ws.delete_rows(1, ws.max_row)
-        ws.append(headers)
-        for row in rows:
-            ws.append([row.get(header) for header in headers])
-
-    def _parse_date(self, raw: Any) -> date:
-        if isinstance(raw, date) and not isinstance(raw, datetime):
-            return raw
-        if isinstance(raw, datetime):
-            return raw.date()
-        return date.fromisoformat(str(raw))
-
-    def _parse_datetime(self, raw: Any) -> datetime:
-        if isinstance(raw, datetime):
-            return raw
-        return datetime.fromisoformat(str(raw))
-
-    def _normalize_user_name(self, row: dict[str, Any]) -> str:
-        name = str(row.get("name") or "").strip()
-        if name:
-            return name
-        email = str(row.get("email") or "").strip()
-        if "@" in email:
-            return email.split("@", 1)[0]
-        return email or "user"
+    def ensure_seed_admin(self) -> UserRecord:
+        existing = self.get_user_by_email("admin@company.com")
+        if existing:
+            return existing
+        user = self.upsert_user(
+            name="Admin Ops",
+            email="admin@company.com",
+            enabled=True,
+            is_admin=True,
+            location="Haifa",
+            department="Facilities",
+        )
+        self.upsert_whitelist(user.email, user.user_id, "system")
+        self.create_audit_log("system", "seed_admin", "user", user.user_id, "Created default admin account")
+        return user
